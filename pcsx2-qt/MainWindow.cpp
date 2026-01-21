@@ -5,6 +5,7 @@
 #include "AutoUpdaterDialog.h"
 #include "CoverDownloadDialog.h"
 #include "DisplayWidget.h"
+#include "GameEventLogWindow.h"
 #include "GameList/GameListRefreshThread.h"
 #include "GameList/GameListWidget.h"
 #include "LogWindow.h"
@@ -153,6 +154,9 @@ void MainWindow::initialize()
 
 	if (Host::GetBoolSettingValue("EmuCore", "EnableMouseLock", false))
 		setupMouseMoveHandler();
+
+	// Open Game Event Log window by default
+	openGameEventLog();
 }
 
 // TODO: Figure out how to set this in the .ui file
@@ -462,6 +466,7 @@ void MainWindow::connectVMThreadSignals(EmuThread* thread)
 	connect(m_ui.actionToolbarFullscreen, &QAction::triggered, thread, &EmuThread::toggleFullscreen);
 	connect(m_ui.actionToggleSoftwareRendering, &QAction::triggered, thread, &EmuThread::toggleSoftwareRendering);
 	connect(m_ui.actionDebugger, &QAction::triggered, this, &MainWindow::openDebugger);
+	connect(m_ui.actionGameEventLog, &QAction::triggered, this, &MainWindow::openGameEventLog);
 	connect(m_ui.actionReloadPatches, &QAction::triggered, thread, &EmuThread::reloadPatches);
 }
 
@@ -2908,6 +2913,19 @@ void MainWindow::openDebugger()
 {
 	DebuggerWindow* dwnd = DebuggerWindow::getInstance();
 	dwnd->isVisible() ? dwnd->activateWindow() : dwnd->show();
+}
+
+void MainWindow::openGameEventLog()
+{
+	if (!g_game_event_log_window)
+	{
+		g_game_event_log_window = new GameEventLogWindow();
+	}
+
+	if (g_game_event_log_window->isVisible())
+		g_game_event_log_window->activateWindow();
+	else
+		g_game_event_log_window->show();
 }
 
 void MainWindow::doControllerSettings(ControllerSettingsWindow::Category category)

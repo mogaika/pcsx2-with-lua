@@ -8,14 +8,19 @@
 #include "Cache.h"
 
 #include "DebugTools/Breakpoints.h"
+#include "x86/iR5900.h"
 
 #include "common/FastJmp.h"
 
 #include <float.h>
+#include <map>
 
 using namespace R5900;		// for OPCODE and OpcodeImpl
 
 extern int vu0branch, vu1branch;
+
+// External reference to execution hooks from iR5900.cpp
+extern std::map<u32, execution_hook_t> s_execution_hooks;
 
 static int branch2 = 0;
 static u32 cpuBlockCycles = 0;		// 3 bit fixed point version of cycle count
@@ -167,6 +172,14 @@ static void execI()
 
 	CBreakPoints::CommitClearSkipFirst(BREAKPOINT_EE);
 #endif
+
+	// Check EE execution hooks
+	if (!s_execution_hooks.empty())
+	{
+		auto hookIt = s_execution_hooks.find(cpuRegs.pc);
+		if (hookIt != s_execution_hooks.end())
+			hookIt->second();
+	}
 
 	const u32 pc = cpuRegs.pc;
 	// We need to increase the pc before executing the memRead32. An exception could appears

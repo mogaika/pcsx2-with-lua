@@ -72,6 +72,12 @@ void recBranchCall(void (*func)());
 void recCall(void (*func)());
 u32 scaleblockcycles_clear();
 
+// EE Execution Hook System
+typedef void (*execution_hook_t)();
+void addExecutionHook(u32 addr, execution_hook_t hook);
+void removeExecutionHook(u32 addr);
+void clearExecutionHooks();
+
 namespace R5900
 {
 	namespace Dynarec

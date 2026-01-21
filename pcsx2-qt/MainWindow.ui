@@ -142,6 +142,7 @@
     <addaction name="menuDebugSwitchRenderer"/>
     <addaction name="separator"/>
     <addaction name="actionDebugger"/>
+    <addaction name="actionGameEventLog"/>
     <addaction name="separator"/>
     <addaction name="actionEnableLogTimestamps"/>
     <addaction name="separator"/>
@@ -859,6 +860,14 @@
    </property>
    <property name="text">
     <string>&amp;Open Debugger</string>
+   </property>
+  </action>
+  <action name="actionGameEventLog">
+   <property name="icon">
+    <iconset theme="file-list-3-line"/>
+   </property>
+   <property name="text">
+    <string>&amp;Game Event Log</string>
    </property>
   </action>
   <action name="actionReloadPatches">

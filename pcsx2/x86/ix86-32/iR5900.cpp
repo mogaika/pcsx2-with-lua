@@ -103,6 +103,35 @@ static void ClearRecLUT(BASEBLOCK* base, int count);
 static u32 scaleblockcycles();
 static void recExitExecution();
 
+// EE Execution Hook System
+#include <map>
+std::map<u32, execution_hook_t> s_execution_hooks;
+
+void addExecutionHook(u32 addr, execution_hook_t hook)
+{
+	s_execution_hooks[addr] = hook;
+}
+
+void removeExecutionHook(u32 addr)
+{
+	s_execution_hooks.erase(addr);
+}
+
+void clearExecutionHooks()
+{
+	s_execution_hooks.clear();
+}
+
+static void encodeExecutionHook()
+{
+	auto it = s_execution_hooks.find(pc);
+	if (it == s_execution_hooks.end())
+		return;
+
+	iFlushCall(FLUSH_EVERYTHING | FLUSH_PC);
+	xFastCall((void*)it->second);
+}
+
 #ifdef TRACE_BLOCKS
 static void pauseAAA()
 {
@@ -1666,6 +1695,9 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		if(encodeBreakpoint() || encodeMemcheck())
 			xFastCall((void*)CBreakPoints::CommitClearSkipFirst, BREAKPOINT_EE);
+
+		// EE execution hooks
+		encodeExecutionHook();
 	}
 	else
 	{
