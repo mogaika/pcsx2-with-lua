@@ -5,9 +5,11 @@
 #include <deque>
 #include "Gif.h"
 #include "Vif.h"
+#include "VU.h"
 #include "GS.h"
 #include "GS/GSRegs.h"
 #include "MTGS.h"
+#include "DebugTools/Debug.h"
 
 // FIXME common path ?
 #include "common/boost_spsc_queue.hpp"
@@ -16,6 +18,11 @@ struct GS_Packet;
 extern void Gif_MTGS_Wait(bool isMTVU);
 extern void Gif_FinishIRQ();
 extern bool Gif_HandlerAD(u8* pMem);
+
+// One-shot VU1 state dump on GIF-related errors (NaN ST, unknown register, packet overflow).
+// Called from EE thread during XGKICK transfer. Only the first call actually writes the dump.
+// kickAddr: actual XGKICK address (-1 = use VU1.xgkickaddr, for callers that set it).
+extern void DumpVU1StateOnGifError(const char* reason, u32 kickAddr = ~0u);
 extern void Gif_HandlerAD_MTVU(u8* pMem);
 extern bool Gif_HandlerAD_Debug(u8* pMem);
 extern void Gif_AddBlankGSPacket(u32 size, GIF_PATH path);
@@ -265,14 +272,98 @@ struct Gif_Path
 	bool hasDataRemaining() const { return curOffset < curSize; }
 	bool isDone() const { return isMTVU() ? !mtvu.fakePackets : (!hasDataRemaining() && (state == GIF_PATH_IDLE || state == GIF_PATH_WAIT)); }
 
+	// Dumps GIF tags from current pending packet data in the buffer
+	void dumpPendingGifTags(const char* caller)
+	{
+		// Walk from gsPack.offset to curSize, parsing GIF tags
+		u32 pos = gsPack.offset;
+		int tagIdx = 0;
+		const int maxTags = 32; // limit output
+		const char* flgNames[] = {"PACKED", "REGLIST", "IMAGE", "IMAGE2"};
+		const char* regNames[] = {
+			"PRIM", "RGBAQ", "ST", "UV", "XYZF2", "XYZ2", "TEX0_1", "TEX0_2",
+			"CLAMP_1", "CLAMP_2", "FOG", "RSVD", "XYZF3", "XYZ3", "A+D", "NOP"
+		};
+
+		DevCon.WriteLn(Color_Yellow, "=== Gif Path[%d] Pending Packet Dump [%s] ===", idx + 1, caller);
+		DevCon.WriteLn(Color_Yellow, "  gsPack.offset=0x%x, gsPack.size=0x%x, curOffset=0x%x, curSize=0x%x",
+			gsPack.offset, gsPack.size, curOffset, curSize);
+
+		while (pos + 16 <= curSize && tagIdx < maxTags)
+		{
+			Gif_Tag gt(&buffer[pos]);
+			u32 nreg = ((gt.tag.NREG - 1) & 0xf) + 1;
+			u32 dataLen = gt.len;
+
+			// Build register list string
+			char regStr[128] = {};
+			int regStrPos = 0;
+			for (u32 r = 0; r < nreg && regStrPos < 120; r++)
+			{
+				u8 reg = (gt.tag.REGS[r / 4] >> ((r % 4) * 4)) & 0xf;
+				regStrPos += snprintf(regStr + regStrPos, sizeof(regStr) - regStrPos,
+					"%s%s", r ? "," : "", regNames[reg]);
+			}
+
+			DevCon.WriteLn(Color_Yellow,
+				"  Tag[%d] @0x%x: NLOOP=%d FLG=%s(%d) NREG=%d EOP=%d PRE=%d PRIM=0x%x len=%d regs=[%s]",
+				tagIdx, pos, gt.tag.NLOOP, flgNames[gt.tag.FLG], gt.tag.FLG,
+				nreg, gt.tag.EOP, gt.tag.PRE, gt.tag.PRIM,
+				dataLen, regStr);
+
+			// For A+D packets, dump the register writes (first few)
+			if (gt.tag.FLG == GIF_FLG_PACKED)
+			{
+				u32 dataPos = pos + 16;
+				int maxDump = std::min((int)gt.tag.NLOOP, 4);
+				for (int loop = 0; loop < maxDump; loop++)
+				{
+					for (u32 r = 0; r < nreg && dataPos + 16 <= curSize; r++)
+					{
+						u8 reg = (gt.tag.REGS[r / 4] >> ((r % 4) * 4)) & 0xf;
+						if (reg == 0x0e) // A+D
+						{
+							u64 data = *(u64*)&buffer[dataPos];
+							u8 addr = buffer[dataPos + 8];
+							DevCon.WriteLn(Color_Yellow,
+								"    [%d.%d] A+D: addr=0x%02x data=0x%016llx",
+								loop, r, addr, data);
+						}
+						dataPos += 16;
+					}
+				}
+				if (gt.tag.NLOOP > (u32)maxDump)
+					DevCon.WriteLn(Color_Yellow, "    ... (%d more loops)", gt.tag.NLOOP - maxDump);
+			}
+
+			pos += 16 + dataLen;
+			tagIdx++;
+
+			if (gt.tag.EOP)
+				break;
+		}
+		if (tagIdx >= maxTags)
+			DevCon.WriteLn(Color_Yellow, "  ... (truncated, more tags follow)");
+		DevCon.WriteLn(Color_Yellow, "=== End Dump (walked 0x%x bytes) ===", pos - gsPack.offset);
+	}
+
 	// Waits on the MTGS to process gs packets
-	void mtgsReadWait()
+	void mtgsReadWait(const char* caller = "unknown")
 	{
 		if (IsDevBuild)
 		{
-			DevCon.WriteLn(Color_Red, "Gif Path[%d] - MTGS Wait! [r=0x%x]", idx + 1, getReadAmount());
+			static int dumpCount = 0;
+			DevCon.WriteLn(Color_Red, "Gif Path[%d] - MTGS Wait! [%s] [r=0x%x, curSize=0x%x, curOffset=0x%x, buffSize=0x%x, buffLimit=0x%x]",
+				idx + 1, caller, getReadAmount(), curSize, curOffset, buffSize, buffLimit);
+			if (dumpCount < 5)
+			{
+				dumpPendingGifTags(caller);
+				dumpCount++;
+				if (dumpCount == 5)
+					DevCon.WriteLn(Color_Yellow, "(Suppressing further GIF packet dumps)");
+			}
 			Gif_MTGS_Wait(isMTVU());
-			DevCon.WriteLn(Color_Green, "Gif Path[%d] - MTGS Wait! [r=0x%x]", idx + 1, getReadAmount());
+			DevCon.WriteLn(Color_Green, "Gif Path[%d] - MTGS Wait done! [%s] [r=0x%x]", idx + 1, caller, getReadAmount());
 			return;
 		}
 		Gif_MTGS_Wait(isMTVU());
@@ -292,7 +383,7 @@ struct Gif_Path
 			s32 frontFree = offset - getReadAmount();
 			if (frontFree >= sizeToAdd - intersect)
 				break;
-			mtgsReadWait();
+			mtgsReadWait("RealignPacket");
 		}
 		if (offset < (s32)buffLimit)
 		{ // Needed for correct readAmount values
@@ -326,7 +417,7 @@ struct Gif_Path
 				break; // MTGS is reading in back of curOffset
 			if ((s32)buffLimit + readPos > (s32)curSize + (s32)size)
 				break;      // Enough free front space
-			mtgsReadWait(); // Let MTGS run to free up buffer space
+			mtgsReadWait("CopyGSPacketData"); // Let MTGS run to free up buffer space
 		}
 		pxAssertMsg(curSize + size <= buffSize, "Gif Path Buffer Overflow!");
 		memcpy(&buffer[curSize], pMem, size);
@@ -594,11 +685,12 @@ struct Gif_Unit
 		u32 curSize = 0;
 		for (;;)
 		{
-			Gif_Tag gifTag(&pMem[offset & memMask]);
+			u32 tagAddr = offset & memMask;
+			Gif_Tag gifTag(&pMem[tagAddr]);
 			incTag(offset, curSize, 16 + gifTag.len); // Tag + Data length
 			if (pathIdx == GIF_PATH_1 && curSize >= 0x4000)
 			{
-				DevCon.Warning("Gif Unit - GS packet size exceeded VU memory size!");
+				DumpVU1StateOnGifError("GS packet size exceeded VU memory size");
 				return 0; // Bios does this... (Fixed if you delay vu1's xgkick by 103 vu cycles)
 			}
 			if (curSize >= size)

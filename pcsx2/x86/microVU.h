@@ -11,6 +11,7 @@
 #include <memory>
 #include "Common.h"
 #include "VU.h"
+#include "VUops.h"
 #include "MTVU.h"
 #include "GS.h"
 #include "Gif_Unit.h"
@@ -121,6 +122,9 @@ struct microVU
 	u32 q;            // Holds current Q instance index
 	u32 totalCycles;  // Total Cycles that mVU is expected to run for
 	s32 cycles;       // Cycles Counter
+
+	u32 pcHitCount[0x4000 / 8]; // Per-PC execution counter (2048 entries, index = bytePC/8)
+	u32 cyclesSinceXGKICK;      // Cycles accumulated since last XGKICK (for infinite loop detection)
 
 	VURegs& regs() const { return ::vuRegs[index]; }
 

@@ -21,8 +21,8 @@ namespace MipsStackWalk
 {
 	// In the worst case, we scan this far above the pc for an entry.
 	const int MAX_FUNC_SIZE = 32768 * 4;
-	// After this we assume we're stuck.
-	const size_t MAX_DEPTH = 1024;
+	// After this we assume we're stuck. Keep low — each frame requires a full ScanForEntry.
+	const size_t MAX_DEPTH = 16;
 
 	static u32 GuessEntry(DebugInterface* cpu, u32 pc)
 	{
@@ -96,7 +96,7 @@ namespace MipsStackWalk
 		return false;
 	}
 
-	bool ScanForEntry(DebugInterface* cpu, StackFrame& frame, u32 entry, u32& ra)
+	bool ScanForEntry(DebugInterface* cpu, StackFrame& frame, u32 entry, u32& ra, u32 maxFuncSize)
 	{
 		// Let's hope there are no > 1MB functions on the PSP, for the sake of humanity...
 		const u32 LONGEST_FUNCTION = 1024 * 1024;
@@ -108,7 +108,8 @@ namespace MipsStackWalk
 
 		if (entry == INVALIDTARGET)
 		{
-			stop = static_cast<u32>(std::max<s64>(0, (s64)start - LONGEST_FUNCTION));
+			const u32 limit = maxFuncSize != 0 ? maxFuncSize : LONGEST_FUNCTION;
+			stop = static_cast<u32>(std::max<s64>(0, (s64)start - limit));
 		}
 
 		for (u32 pc = start; cpu->isValidAddress(pc) && pc >= stop; pc -= 4)
@@ -162,9 +163,9 @@ namespace MipsStackWalk
 		return false;
 	}
 
-	bool DetermineFrameInfo(DebugInterface* cpu, StackFrame& frame, u32 possibleEntry, u32 threadEntry, u32& ra)
+	bool DetermineFrameInfo(DebugInterface* cpu, StackFrame& frame, u32 possibleEntry, u32 threadEntry, u32& ra, u32 maxFuncSize)
 	{
-		if (ScanForEntry(cpu, frame, possibleEntry, ra))
+		if (ScanForEntry(cpu, frame, possibleEntry, ra, maxFuncSize))
 		{
 			// Awesome, found one that looks right.
 			return true;
@@ -180,10 +181,10 @@ namespace MipsStackWalk
 		// Okay, we failed to get one.  Our possibleEntry could be wrong, it often is.
 		// Let's just scan upward.
 		u32 newPossibleEntry = frame.pc > threadEntry ? threadEntry : frame.pc - MAX_FUNC_SIZE;
-		return ScanForEntry(cpu, frame, newPossibleEntry, ra);
+		return ScanForEntry(cpu, frame, newPossibleEntry, ra, maxFuncSize);
 	}
 
-	std::vector<StackFrame> Walk(DebugInterface* cpu, u32 pc, u32 ra, u32 sp, u32 threadEntry, u32 threadStackTop)
+	std::vector<StackFrame> Walk(DebugInterface* cpu, u32 pc, u32 ra, u32 sp, u32 threadEntry, u32 threadStackTop, u32 maxFuncSize)
 	{
 		std::vector<StackFrame> frames;
 		StackFrame current;
@@ -196,7 +197,7 @@ namespace MipsStackWalk
 		while (pc != threadEntry)
 		{
 			u32 possibleEntry = GuessEntry(cpu, current.pc);
-			if (DetermineFrameInfo(cpu, current, possibleEntry, threadEntry, ra))
+			if (DetermineFrameInfo(cpu, current, possibleEntry, threadEntry, ra, maxFuncSize))
 			{
 				frames.push_back(current);
 				if (current.entry == threadEntry || GuessEntry(cpu, current.entry) == threadEntry)

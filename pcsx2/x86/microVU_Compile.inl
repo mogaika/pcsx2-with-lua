@@ -495,6 +495,19 @@ void mVUtestCycles(microVU& mVU, microFlagCycles& mFC)
 	skip.SetTarget();
 
 	xSUB(ptr32[&mVU.cycles], mVUcycles);
+
+	// VU1 infinite loop detection: track cycles since last XGKICK
+	if (isVU1)
+	{
+		xADD(ptr32[&mVU.cyclesSinceXGKICK], (u32)mVUcycles);
+		xCMP(ptr32[&mVU.cyclesSinceXGKICK], 60000);
+		xForwardJL32 noOverflow;
+		mVUbackupRegs(mVU, true);
+		xFastCall((const void*)vu1InfiniteLoopDetected);
+		mVUrestoreRegs(mVU, true);
+		xMOV(ptr32[&mVU.cyclesSinceXGKICK], 0); // reset after reporting
+		noOverflow.SetTarget();
+	}
 }
 
 //------------------------------------------------------------------
@@ -896,6 +909,9 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 		{
 			mVU_XGKICK_SYNC(mVU, false);
 		}
+
+		if (isVU1)
+			xADD(ptr32[&mVU.pcHitCount[xPC / 8]], 1);
 
 		mVUexecuteInstruction(mVU);
 		if (!mVUinfo.isBdelay && !mVUlow.branch) //T/D Bit on branch is handled after the branch, branch delay slots are executed.

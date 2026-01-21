@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/MemoryTrace.h"
 #include "Elfheader.h"
 #include "GS.h"
 #include "Memory.h"
@@ -20,6 +21,8 @@
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
 #include "common/Perf.h"
+
+#include "fmt/format.h"
 
 // Only for MOVQ workaround.
 #include "common/emitter/internal.h"
@@ -102,6 +105,40 @@ static void iBranchTest(u32 newpc = 0xffffffff);
 static void ClearRecLUT(BASEBLOCK* base, int count);
 static u32 scaleblockcycles();
 static void recExitExecution();
+
+// EE Execution Hook System
+#include <map>
+void recClear(u32 addr, u32 size);
+std::map<u32, execution_hook_t> s_execution_hooks;
+bool g_executionHookSkipBlock = false;
+
+void addExecutionHook(u32 addr, execution_hook_t hook)
+{
+	s_execution_hooks[addr] = hook;
+	recClear(addr, 1);
+}
+
+void removeExecutionHook(u32 addr)
+{
+	s_execution_hooks.erase(addr);
+	recClear(addr, 1);
+}
+
+void clearExecutionHooks()
+{
+	s_execution_hooks.clear();
+}
+
+const std::map<u32, execution_hook_t>& getExecutionHooks()
+{
+	return s_execution_hooks;
+}
+
+// encodeExecutionHook is defined later (after DispatcherReg)
+static void encodeExecutionHook();
+
+// encodeMemoryTrace is defined later (after DispatcherReg)
+static void encodeMemoryTrace();
 
 #ifdef TRACE_BLOCKS
 static void pauseAAA()
@@ -363,6 +400,116 @@ static void recEventTest()
 		eeRecExitRequested = false;
 		recExitExecution();
 	}
+}
+
+// Implementation of encodeExecutionHook (needs DispatcherReg to be defined)
+static void encodeExecutionHook()
+{
+	auto it = s_execution_hooks.find(pc);
+	if (it == s_execution_hooks.end())
+		return;
+
+	iFlushCall(FLUSH_EVERYTHING | FLUSH_PC);
+
+	// Reset skip flag before calling hook
+	xMOV(ptr8[&g_executionHookSkipBlock], 0);
+
+	// Call the hook
+	xFastCall((void*)it->second);
+
+	// Check if hook wants to skip block execution
+	xCMP(ptr8[&g_executionHookSkipBlock], 0);
+	xForwardJE8 continueBlock;
+
+	// Hook set skip flag - jump to dispatcher (cpuRegs.pc should be set by hook)
+	xJMP(DispatcherReg);
+
+	continueBlock.SetTarget();
+}
+
+// ===========================================
+// Memory Trace Support for Recompiler
+// ===========================================
+
+// Struct to pass parameters to dynarecMemoryTraceCheck (avoids >2 arg limitation of xFastCall)
+struct MemoryTraceParams
+{
+	u32 addr;
+	u32 size;
+	u32 pc;
+	u32 isWrite;
+};
+static MemoryTraceParams s_memTraceParams;
+
+// Fast-path check using global bitmask, then calls trace manager if needed
+// Parameters are read from s_memTraceParams (no function arguments needed)
+static void dynarecMemoryTraceCheck()
+{
+	// Fast bitmask check - g_memTraceRegions covers full 32-bit address space
+	if (g_memTraceRegions[s_memTraceParams.addr >> 16] == 0)
+		return;
+
+	if (s_memTraceParams.isWrite)
+		MemoryTraceManager::Instance().OnMemoryWrite(s_memTraceParams.addr, s_memTraceParams.size, s_memTraceParams.pc);
+	else
+		MemoryTraceManager::Instance().OnMemoryRead(s_memTraceParams.addr, s_memTraceParams.size, s_memTraceParams.pc);
+}
+
+// Generate code to check memory traces for current instruction
+// Flushes registers then calls dynarecMemoryTraceCheck which does a fast bitmask check
+static void recMemoryTrace(u32 op, u32 bits, bool store)
+{
+	const u32 rs = (op >> 21) & 0x1F;
+	const s16 imm = static_cast<s16>(op);
+
+	// Flush all registers to memory before our call
+	iFlushCall(FLUSH_EVERYTHING | FLUSH_PC);
+
+	// Compute address into ecx (after flush, GPR values are in cpuRegs.GPR.r[])
+	if (rs == 0)
+	{
+		xXOR(ecx, ecx);
+	}
+	else
+	{
+		xMOV(ecx, ptr32[&cpuRegs.GPR.r[rs].UL[0]]);
+	}
+
+	// Add immediate offset if present
+	if (imm != 0)
+		xADD(ecx, imm);
+
+	// Align for 128-bit accesses
+	if (bits == 128)
+		xAND(ecx, ~0x0F);
+
+	// Store parameters and call check function
+	xMOV(ptr32[&s_memTraceParams.addr], ecx);
+	xMOV(ptr32[&s_memTraceParams.size], bits / 8);
+	xMOV(ptr32[&s_memTraceParams.pc], pc);
+	xMOV(ptr32[&s_memTraceParams.isWrite], store ? 1 : 0);
+
+	xFastCall((void*)dynarecMemoryTraceCheck);
+}
+
+// Encode memory trace check for the current instruction if it's a memory operation
+static void encodeMemoryTrace()
+{
+	// No HasActiveTraces() check - the inline bitmask check handles it
+	// This ensures ALL memory operations have trace checks embedded,
+	// so traces work even for blocks compiled before traces were registered
+
+	const u32 op = memRead32(pc);
+	const OPCODE& opcode = GetInstruction(op);
+
+	// Only process memory operations
+	if (!(opcode.flags & IS_MEMORY))
+		return;
+
+	const bool store = (opcode.flags & IS_STORE) != 0;
+
+	const u32 sizeBytes = getSizeFromMemtypeFlags(opcode.flags);
+	recMemoryTrace(op, sizeBytes * 8, store);
 }
 
 // The address for all cleared blocks.  It recompiles the current pc and then
@@ -1528,6 +1675,8 @@ void dynarecCheckBreakpoint()
 		return;
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
+	VMManager::SetPauseReason(VMPauseReason::Breakpoint,
+		fmt::format("EE breakpoint at 0x{:08x}", cpuRegs.pc), cpuRegs.pc);
 	VMManager::SetPaused(true);
 	recExitExecution();
 }
@@ -1559,6 +1708,8 @@ void dynarecMemcheck(size_t i)
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
+	VMManager::SetPauseReason(VMPauseReason::MemWatch,
+		fmt::format("EE memcheck at 0x{:08x}", cpuRegs.pc), cpuRegs.pc);
 	VMManager::SetPaused(true);
 	recExitExecution();
 }
@@ -1666,6 +1817,12 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		if(encodeBreakpoint() || encodeMemcheck())
 			xFastCall((void*)CBreakPoints::CommitClearSkipFirst, BREAKPOINT_EE);
+
+		// EE execution hooks
+		encodeExecutionHook();
+
+		// Memory trace support (for debugging resource accesses)
+		encodeMemoryTrace();
 	}
 	else
 	{

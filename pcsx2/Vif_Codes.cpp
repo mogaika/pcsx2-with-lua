@@ -4,9 +4,13 @@
 #include "Common.h"
 #include "GS.h"
 #include "Gif_Unit.h"
+#include "Host.h"
 #include "MTVU.h"
+#include "VMManager.h"
 #include "VUmicro.h"
 #include "Vif_Dma.h"
+
+#include "fmt/format.h"
 #include "Vif_Dynarec.h"
 
 #define vifOp(vifCodeName) _vifT int vifCodeName(int pass, const u32* data)
@@ -107,6 +111,9 @@ static __fi void vuExecMicro(int idx, u32 addr, bool requires_wait)
 			vifRegs.stat.DBF = true;
 		}
 	}
+
+	if (idx == 1)
+		vu1TraceSnapshotVifLog();
 
 	GetVifX.queued_program = true;
 	if (static_cast<s32>(addr) == -1)
@@ -548,6 +555,39 @@ vifOp(vifCode_Nop)
 	return 1;
 }
 
+static void vifDumpMemoryAround(const char* label, u32 ps2Addr, int range = 256)
+{
+	if (ps2Addr == 0)
+		return;
+
+	u32 start = (ps2Addr > (u32)range) ? (ps2Addr - range) : 0;
+	u32 end = ps2Addr + range;
+	start &= ~0xFu; // align to 16 bytes
+
+	Console.WriteLn("=== Memory dump around %s (0x%08x), range [0x%08x - 0x%08x] ===", label, ps2Addr, start, end);
+
+	for (u32 addr = start; addr < end; addr += 16)
+	{
+		const u8* ptr = (const u8*)PSM(addr);
+		if (!ptr)
+		{
+			Console.WriteLn("  %08x: <unmapped>", addr);
+			continue;
+		}
+
+		char hex[64], ascii[20];
+		for (int i = 0; i < 16; i++)
+		{
+			std::snprintf(hex + i * 3, 4, "%02x ", ptr[i]);
+			ascii[i] = (ptr[i] >= 0x20 && ptr[i] < 0x7f) ? (char)ptr[i] : '.';
+		}
+		ascii[16] = '\0';
+
+		const char* marker = (addr <= ps2Addr && ps2Addr < addr + 16) ? " <--" : "";
+		Console.WriteLn("  %08x: %s |%s|%s", addr, hex, ascii, marker);
+	}
+}
+
 // ToDo: Review Flags
 vifOp(vifCode_Null)
 {
@@ -558,10 +598,49 @@ vifOp(vifCode_Null)
 		if (!(vifXRegs.err.ME1))
 		{ // Ignore vifcode and tag mismatch error
 			Console.WriteLn("Vif%d: Unknown VifCmd! [%x]", idx, vifX.cmd);
+
+			// Dump VIF registers
+			Console.WriteLn("  VIF%d Regs: code=0x%08x stat=0x%08x err=0x%08x mark=0x%08x",
+				idx, vifXRegs.code, vifXRegs.stat._u32, vifXRegs.err._u32, vifXRegs.mark);
+			Console.WriteLn("  VIF%d Regs: cycle.cl=%d cycle.wl=%d mode=0x%x num=%d mask=0x%08x",
+				idx, vifXRegs.cycle.cl, vifXRegs.cycle.wl, vifXRegs.mode, vifXRegs.num, vifXRegs.mask);
+			Console.WriteLn("  VIF%d Regs: itops=0x%x itop=0x%x base=0x%x ofst=0x%x tops=0x%x top=0x%x addr=0x%x",
+				idx, vifXRegs.itops, vifXRegs.itop, vifXRegs.base, vifXRegs.ofst, vifXRegs.tops, vifXRegs.top, vifXRegs.addr);
+
+			// Dump DMA channel state
+			Console.WriteLn("  DMA Ch: chcr=0x%08x madr=0x%08x qwc=0x%04x tadr=0x%08x",
+				vifXch.chcr._u32, vifXch.madr, vifXch.qwc, vifXch.tadr);
+			Console.WriteLn("  DMA Ch: asr0=0x%08x asr1=0x%08x sadr=0x%08x",
+				vifXch.asr0, vifXch.asr1, vifXch.sadr);
+
+			// Dump VIF internal state
+			Console.WriteLn("  VIF%d State: tag.addr=0x%x tag.size=%d tag.cmd=0x%x tag.cl=%d tag.wl=%d",
+				idx, vifX.tag.addr, vifX.tag.size, vifX.tag.cmd, vifX.tag.cl, vifX.tag.wl);
+			Console.WriteLn("  VIF%d State: vifpacketsize=%d inprogress=%d dmamode=%d irq=%d done=%d",
+				idx, vifX.vifpacketsize, vifX.inprogress, vifX.dmamode, vifX.irq, vifX.done);
+
+			// Memory dump around MADR (current DMA transfer address)
+			vifDumpMemoryAround("MADR", vifXch.madr);
+
+			// Memory dump around TADR (tag address) if in chain mode
+			if (vifXch.tadr != 0 && vifXch.tadr != vifXch.madr)
+				vifDumpMemoryAround("TADR", vifXch.tadr);
+
 			vifXRegs.stat.ER1 = true;
 			vifX.vifstalled.enabled = VifStallEnable(vifXch);
 			vifX.vifstalled.value = VIF_IRQ_STALL;
-			//vifX.irq++;
+
+			// Pause execution (reuse PauseOnError setting)
+			if (EmuConfig.Cpu.Recompiler.PauseOnError)
+			{
+				const std::string message(fmt::format(
+					"Vif{}: Unknown VifCmd! [0x{:02x}]\n"
+					"code=0x{:08x} madr=0x{:08x} tadr=0x{:08x} qwc=0x{:x}",
+					idx, vifX.cmd, vifXRegs.code, vifXch.madr, vifXch.tadr, vifXch.qwc));
+				VMManager::SetPauseReason(VMPauseReason::VIFError, message);
+				VMManager::SetPaused(true);
+				Host::ReportErrorAsync("VIF Error", message);
+			}
 		}
 		vifX.cmd = 0;
 		vifX.pass = 0;

@@ -112,6 +112,7 @@ public:
 	void doGameSettings(const char* category = nullptr);
 
 	void openDebugger();
+	void openLuaMods();
 	void checkMousePosition(int x, int y);
 public Q_SLOTS:
 	void checkForUpdates(bool display_message, bool force_check);

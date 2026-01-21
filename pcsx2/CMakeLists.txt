@@ -799,7 +799,8 @@ set(pcsx2DebugToolsSources
 	DebugTools/DisR5900asm.cpp
 	DebugTools/DisVU0Micro.cpp
 	DebugTools/DisVU1Micro.cpp
-	DebugTools/BiosDebugData.cpp)
+	DebugTools/BiosDebugData.cpp
+	DebugTools/MemoryTrace.cpp)
 
 # DebugTools headers
 set(pcsx2DebugToolsHeaders
@@ -817,7 +818,8 @@ set(pcsx2DebugToolsHeaders
 	DebugTools/DisASM.h
 	DebugTools/DisVUmicro.h
 	DebugTools/DisVUops.h
-	DebugTools/BiosDebugData.h)
+	DebugTools/BiosDebugData.h
+	DebugTools/MemoryTrace.h)
 
 set(pcsx2HostSources
 	Host/AudioStream.cpp

@@ -325,6 +325,8 @@ _mVUt void* mVUexecute(u32 startPC, u32 cycles)
 
 	mVU.cycles = cycles;
 	mVU.totalCycles = cycles;
+	if constexpr (vuIndex == 1)
+		mVU.cyclesSinceXGKICK = 0;
 
 	xSetPtr(mVU.prog.x86ptr); // Set x86ptr to where last program left off
 	return mVUsearchProg<vuIndex>(startPC & vuLimit, (uptr)&mVU.prog.lpState); // Find and set correct program
@@ -365,6 +367,12 @@ _mVUt void mVUcleanUp()
 				VU0.cycle += cycles_passed;
 		}
 	}
+	if constexpr (vuIndex == 1)
+	{
+		if (g_vu1Trace.active)
+			vu1TraceOnFinish(mVU.cycles);
+	}
+
 	mVU.profiler.Print();
 }
 

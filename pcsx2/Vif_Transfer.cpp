@@ -4,6 +4,8 @@
 #include "Common.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
+#include "VUops.h"
+#include "Dmac.h"
 
 //------------------------------------------------------------------
 // VifCode Transfer Interpreter (Vif0/Vif1)
@@ -35,6 +37,14 @@ _vifT void vifTransferLoop(u32* &data) {
 			vifXRegs.code = data[0];
 			vifX.cmd	  = data[0] >> 24;
 
+			if constexpr (idx == 1)
+			{
+				if (g_vu1Trace.armed)
+				{
+					u32 vifAddr = static_cast<u32>((u8*)data - eeMem->Main);
+					g_vu1Trace.vifLog.push_back({data[0], vifAddr, vif1ch.madr});
+				}
+			}
 
 			VIF_LOG("New VifCMD %x tagsize %x irq %d", vifX.cmd, vifX.tag.size, vifX.irq);
 			if (IsDevBuild && TraceLogging.EE.VIFcode.IsActive()) {

@@ -27,6 +27,28 @@ enum class VMState
 	Stopping,
 };
 
+enum class VMPauseReason : u8
+{
+	None,
+	UserRequest,
+	Breakpoint,
+	MemWatch,
+	TLBMiss,
+	BusError,
+	VIFError,
+	DMAError,
+	FrameAdvance,
+	InputRecording,
+	LuaAssert,
+};
+
+struct VMPauseInfo
+{
+	VMPauseReason reason = VMPauseReason::None;
+	std::string message;
+	u32 pc = 0;
+};
+
 struct VMBootParameters
 {
 	std::string filename;
@@ -133,6 +155,12 @@ namespace VMManager
 
 	/// Changes the pause state of the VM, resetting anything needed when unpausing.
 	void SetPaused(bool paused);
+
+	/// Sets the reason for the upcoming pause. Call before SetPaused(true).
+	void SetPauseReason(VMPauseReason reason, std::string message = {}, u32 pc = 0);
+
+	/// Returns a copy of the current pause info (thread-safe).
+	VMPauseInfo GetPauseInfo();
 
 	/// Reloads settings, and applies any changes present.
 	void ApplySettings();

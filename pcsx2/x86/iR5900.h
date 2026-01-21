@@ -5,9 +5,12 @@
 
 #include "Config.h"
 #include "R5900.h"
+#include "R5900OpcodeTables.h"
 #include "R5900_Profiler.h"
 #include "VU.h"
 #include "iCore.h"
+
+#include <map>
 
 #include "common/emitter/x86emitter.h"
 
@@ -71,6 +74,30 @@ void iFlushCall(int flushtype);
 void recBranchCall(void (*func)());
 void recCall(void (*func)());
 u32 scaleblockcycles_clear();
+
+// EE Execution Hook System
+typedef void (*execution_hook_t)();
+void addExecutionHook(u32 addr, execution_hook_t hook);
+void removeExecutionHook(u32 addr);
+void clearExecutionHooks();
+const std::map<u32, execution_hook_t>& getExecutionHooks();
+
+// Flag set by hook to skip block execution and jump to dispatcher
+extern bool g_executionHookSkipBlock;
+
+// Helper function to get memory access size in bytes from opcode flags
+inline u32 getSizeFromMemtypeFlags(u32 flags)
+{
+	switch (flags & MEMTYPE_MASK)
+	{
+		case MEMTYPE_BYTE:  return 1;
+		case MEMTYPE_HALF:  return 2;
+		case MEMTYPE_WORD:  return 4;
+		case MEMTYPE_DWORD: return 8;
+		case MEMTYPE_QWORD: return 16;
+		default:            return 4;
+	}
+}
 
 namespace R5900
 {

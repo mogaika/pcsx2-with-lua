@@ -52,6 +52,8 @@ void mVUreset(microVU& mVU, bool resetReserve)
 	mVU.regs().nextBlockCycles = 0;
 	memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState));
 	mVU.profiler.Reset(mVU.index);
+	std::memset(mVU.pcHitCount, 0, sizeof(mVU.pcHitCount));
+	mVU.cyclesSinceXGKICK = 0;
 
 	// Program Variables
 	mVU.prog.cleared  =  1;
@@ -486,3 +488,6 @@ void DumpVUState(u32 n, u32 pc)
 }
 
 #endif
+
+u32* getVU1PcHitCounts() { return microVU1.pcHitCount; }
+void resetVU1PcHitCounts() { std::memset(microVU1.pcHitCount, 0, sizeof(microVU1.pcHitCount)); }

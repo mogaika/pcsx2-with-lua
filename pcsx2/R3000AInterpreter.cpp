@@ -8,6 +8,8 @@
 
 #include "R5900OpcodeTables.h"
 #include "DebugTools/Breakpoints.h"
+
+#include "fmt/format.h"
 #include "IopBios.h"
 #include "IopHw.h"
 
@@ -133,6 +135,8 @@ void psxBreakpoint(bool memcheck)
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_IOP);
+	VMManager::SetPauseReason(memcheck ? VMPauseReason::MemWatch : VMPauseReason::Breakpoint,
+		fmt::format("IOP {} at 0x{:08x}", memcheck ? "memcheck" : "breakpoint", psxRegs.pc), psxRegs.pc);
 	VMManager::SetPaused(true);
 	Cpu->ExitExecution();
 }

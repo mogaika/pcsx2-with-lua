@@ -10,6 +10,8 @@
 #include "Common.h"
 #include "VMManager.h"
 
+#include "fmt/format.h"
+
 #include <time.h>
 
 #ifndef _WIN32
@@ -1287,6 +1289,8 @@ static bool psxDynarecCheckBreakpoint()
 		return false;
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_IOP);
+	VMManager::SetPauseReason(VMPauseReason::Breakpoint,
+		fmt::format("IOP breakpoint at 0x{:08x}", psxRegs.pc), psxRegs.pc);
 	VMManager::SetPaused(true);
 
 	// Exit the EE too.
@@ -1321,6 +1325,8 @@ static bool psxDynarecMemcheck(size_t i)
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_IOP);
+	VMManager::SetPauseReason(VMPauseReason::MemWatch,
+		fmt::format("IOP memcheck at 0x{:08x}", psxRegs.pc), psxRegs.pc);
 	VMManager::SetPaused(true);
 
 	// Exit the EE too.

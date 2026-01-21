@@ -510,6 +510,66 @@ void GoemonUnloadTlb(u32 key)
 	}
 }
 
+static void vtlb_DumpCpuState()
+{
+	static const char* gprNames[32] = {
+		"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3",
+		"t0",   "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+		"s0",   "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+		"t8",   "t9", "k0", "k1", "gp", "sp", "s8", "ra"
+	};
+
+	Console.Error("=== R5900 CPU State (NOTE: GPRs may be stale in recompiler - not flushed before handler) ===");
+
+	// GPR registers (4 per line)
+	for (int i = 0; i < 32; i += 4)
+	{
+		Console.Error("  $%-4s=%08x  $%-4s=%08x  $%-4s=%08x  $%-4s=%08x",
+			gprNames[i],     cpuRegs.GPR.r[i].UL[0],
+			gprNames[i + 1], cpuRegs.GPR.r[i + 1].UL[0],
+			gprNames[i + 2], cpuRegs.GPR.r[i + 2].UL[0],
+			gprNames[i + 3], cpuRegs.GPR.r[i + 3].UL[0]);
+	}
+
+	// Key COP0 registers
+	Console.Error("  COP0: Status=%08x Cause=%08x EPC=%08x BadVAddr=%08x ErrorEPC=%08x",
+		cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.ErrorEPC);
+	Console.Error("  HI=%08x LO=%08x SA=%08x",
+		cpuRegs.HI.UL[0], cpuRegs.LO.UL[0], cpuRegs.sa);
+
+	// PS2 stack walk - scan stack for return addresses
+	u32 sp = cpuRegs.GPR.n.sp.UL[0];
+	u32 ra = cpuRegs.GPR.n.ra.UL[0];
+	Console.Error("=== PS2 Stack Trace (heuristic) ===");
+	Console.Error("  $ra = 0x%08x", ra);
+
+	// Scan stack for plausible code pointers
+	// PS2 EE code typically lives in 0x00100000-0x01ffffff (user space)
+	int found = 0;
+	const int maxEntries = 16;
+	const int maxScan = 0x400; // scan 1KB of stack
+
+	for (u32 off = 0; off < maxScan && found < maxEntries; off += 4)
+	{
+		u32 stackAddr = sp + off;
+		// Make sure stack address is in valid PS2 RAM range
+		if (stackAddr >= 0x02000000)
+			break;
+
+		u32 val = *(u32*)PSM(stackAddr);
+		// Check if it looks like a code address in user space
+		if (val >= 0x00100000 && val < 0x01000000 && (val & 3) == 0)
+		{
+			Console.Error("  [sp+0x%03x] = 0x%08x", off, val);
+			found++;
+		}
+	}
+	if (found == 0)
+		Console.Error("  (no plausible return addresses found on stack)");
+	Console.Error("=== End CPU State ===");
+}
+
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
@@ -530,10 +590,12 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	}
 
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
+	if (EmuConfig.Cpu.Recompiler.PauseOnError)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
 		Host::ReportErrorAsync("R5900 Exception", message);
+		vtlb_DumpCpuState();
+		VMManager::SetPauseReason(VMPauseReason::TLBMiss, message, cpuRegs.pc);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;
@@ -541,7 +603,11 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 
 	static int spamStop = 0;
 	if (spamStop++ < 50 || IsDevBuild)
+	{
 		Console.Error(message);
+		if (spamStop <= 3)
+			vtlb_DumpCpuState();
+	}
 }
 
 // BusError exception: more serious than a TLB miss.  If properly emulated the PS2 kernel
@@ -549,17 +615,25 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 // time of the exception.
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
-	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
+	const std::string message(fmt::format("Bus Error, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
+	if (EmuConfig.Cpu.Recompiler.PauseOnError)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
 		Host::ReportErrorAsync("R5900 Exception", message);
+		vtlb_DumpCpuState();
+		VMManager::SetPauseReason(VMPauseReason::BusError, message, cpuRegs.pc);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;
 	}
 
-	Console.Error(message);
+	static int busErrSpamStop = 0;
+	if (busErrSpamStop++ < 50 || IsDevBuild)
+	{
+		Console.Error(message);
+		if (busErrSpamStop <= 3)
+			vtlb_DumpCpuState();
+	}
 }
 
 // clang-format off

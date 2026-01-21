@@ -3,6 +3,7 @@
 
 #include "AutoUpdaterDialog.h"
 #include "Debugger/DebuggerWindow.h"
+#include "lua-mods/LuaHooks.h"
 #include "DisplayWidget.h"
 #include "GameList/GameListWidget.h"
 #include "LogWindow.h"
@@ -259,6 +260,7 @@ void EmuThread::resetVM()
 	}
 
 	VMManager::Reset();
+	LuaHooks::reloadScripts();
 }
 
 void EmuThread::setVMPaused(bool paused)

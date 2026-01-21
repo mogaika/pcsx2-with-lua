@@ -11,6 +11,9 @@ struct ImVec2;
 namespace ImGuiManager
 {
 	void RenderOverlays();
+
+	using CustomOverlayRenderFunc = void(*)();
+	void SetCustomOverlayRenderFunc(CustomOverlayRenderFunc func);
 }
 
 ImVec2 CalculateOSDPosition(OsdOverlayPos position, float margin, const ImVec2& text_size, float window_width, float window_height);

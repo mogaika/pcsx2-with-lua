@@ -177,6 +177,8 @@ static bool s_elf_executed = false;
 static std::string s_elf_override;
 static std::string s_input_profile_name;
 static u32 s_frame_advance_count = 0;
+static std::mutex s_pause_info_mutex;
+static VMPauseInfo s_pause_info;
 static bool s_fast_boot_requested = false;
 static bool s_gs_open_on_initialize = false;
 static bool s_thread_affinities_set = false;
@@ -200,6 +202,10 @@ static time_t s_discord_presence_time_epoch;
 
 // Making GSDumpReplayer.h dependent on R5900.h is a no-no, since the GS uses it.
 extern R5900cpu GSDumpReplayerCpu;
+
+// One-shot dump flag resets (defined in Dmac.cpp, Gif_Unit.cpp)
+extern void resetDmaDumpFlags();
+extern void resetGifDumpFlags();
 
 bool VMManager::PerformEarlyHardwareChecks(const char** error)
 {
@@ -1740,6 +1746,10 @@ void VMManager::Reset()
 	cpuReset();
 	hwReset();
 
+	// Reset one-shot dump flags
+	::resetDmaDumpFlags();
+	::resetGifDumpFlags();
+
 	if (g_InputRecording.isActive())
 	{
 		g_InputRecording.handleReset();
@@ -2717,10 +2727,44 @@ void VMManager::IdlePollUpdate()
 	InputManager::PollSources();
 }
 
+void VMManager::SetPauseReason(VMPauseReason reason, std::string message, u32 pc)
+{
+	std::lock_guard lock(s_pause_info_mutex);
+	s_pause_info.reason = reason;
+	s_pause_info.message = std::move(message);
+	s_pause_info.pc = pc;
+}
+
+VMPauseInfo VMManager::GetPauseInfo()
+{
+	std::lock_guard lock(s_pause_info_mutex);
+	return s_pause_info;
+}
+
 void VMManager::SetPaused(bool paused)
 {
 	if (!HasValidVM())
 		return;
+
+	if (paused)
+	{
+		// If no reason was set before this call, default to UserRequest
+		std::lock_guard lock(s_pause_info_mutex);
+		if (s_pause_info.reason == VMPauseReason::None)
+		{
+			s_pause_info.reason = VMPauseReason::UserRequest;
+			s_pause_info.message.clear();
+			s_pause_info.pc = 0;
+		}
+	}
+	else
+	{
+		// Clear reason on resume
+		std::lock_guard lock(s_pause_info_mutex);
+		s_pause_info.reason = VMPauseReason::None;
+		s_pause_info.message.clear();
+		s_pause_info.pc = 0;
+	}
 
 	Console.WriteLn(paused ? "(VMManager) Pausing..." : "(VMManager) Resuming...");
 	SetState(paused ? VMState::Paused : VMState::Running);
@@ -2860,6 +2904,7 @@ void VMManager::Internal::VSyncOnCPUThread()
 		if (s_frame_advance_count == 0)
 		{
 			// auto pause at the end of frame advance
+			SetPauseReason(VMPauseReason::FrameAdvance);
 			SetState(VMState::Paused);
 		}
 	}

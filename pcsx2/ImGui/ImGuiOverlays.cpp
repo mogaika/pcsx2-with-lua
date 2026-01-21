@@ -1428,6 +1428,13 @@ void SaveStateSelectorUI::ShowSlotOSDMessage()
 		Host::OSD_QUICK_DURATION);
 }
 
+static ImGuiManager::CustomOverlayRenderFunc s_customOverlayRenderFunc = nullptr;
+
+void ImGuiManager::SetCustomOverlayRenderFunc(CustomOverlayRenderFunc func)
+{
+	s_customOverlayRenderFunc = func;
+}
+
 void ImGuiManager::RenderOverlays()
 {
 	const float scale = ImGuiManager::GetGlobalScale();
@@ -1445,6 +1452,9 @@ void ImGuiManager::RenderOverlays()
 	DrawInputsOverlay(scale, margin, spacing);
 	if (SaveStateSelectorUI::s_open)
 		SaveStateSelectorUI::Draw();
+
+	if (s_customOverlayRenderFunc)
+		s_customOverlayRenderFunc();
 }
 
 std::string SaveStateSelectorUI::GetSaveStateTimestampSummary(const std::time_t& modification_time)

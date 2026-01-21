@@ -21,6 +21,18 @@ target_sources(pcsx2-qt PRIVATE
 	DisplayWidget.cpp
 	DisplayWidget.h
 	EarlyHardwareCheck.cpp
+	lua-mods/DebugServer.cpp
+	lua-mods/DebugServer.h
+	lua-mods/LuaHooks.cpp
+	lua-mods/LuaHooks.h
+	lua-mods/MemTracker.cpp
+	lua-mods/MemTracker.h
+	lua-mods/LuaEngine.cpp
+	lua-mods/LuaEngine.h
+	lua-mods/LuaOverlay.cpp
+	lua-mods/LuaOverlay.h
+	lua-mods/LuaModWindow.cpp
+	lua-mods/LuaModWindow.h
 	LogWindow.cpp
 	LogWindow.h
 	MainWindow.cpp
@@ -292,6 +304,8 @@ target_link_libraries(pcsx2-qt PRIVATE
 	Qt6::GuiPrivate
 	Qt6::Widgets
 	KDAB::kddockwidgets
+	sol2::sol2
+	rapidjson
 )
 
 # Our Qt builds may have exceptions on, so force them off.

@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build_linux:
+    name: "Linux"
+    uses: ./.github/workflows/linux_build_qt.yml
+    with:
+      jobName: "Linux AppImage"
+      artifactPrefixName: "PCSX2-linux-Qt-x64-appimage"
+      compiler: clang
+      cmakeflags: ""
+      buildAppImage: true
+      fetchTags: true
+    secrets: inherit
+
+  build_windows:
+    name: "Windows"
+    uses: ./.github/workflows/windows_build_qt.yml
+    with:
+      jobName: "Windows CMake"
+      artifactPrefixName: "PCSX2-windows-Qt-x64"
+      configuration: CMake
+      buildSystem: cmake
+      cmakeFlags: -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+      fetchTags: true
+    secrets: inherit
+
+  create_release:
+    name: "Create Release"
+    needs: [build_linux, build_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: ./artifacts/
+
+      - name: Display artifacts
+        run: ls -laR ./artifacts/
+
+      - name: Package Windows build
+        working-directory: ./artifacts/
+        run: |
+          for d in *windows*/; do
+            7z a "${d%/}.7z" "./$d"/*
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            ./artifacts/*windows*/*.7z
+            ./artifacts/*linux*/*.AppImage

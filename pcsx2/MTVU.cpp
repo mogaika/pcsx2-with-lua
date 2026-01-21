@@ -6,6 +6,7 @@
 #include "MTVU.h"
 #include "VMManager.h"
 #include "Vif_Dynarec.h"
+#include "VUops.h"
 
 #include <thread>
 
@@ -150,6 +151,8 @@ void VU_Thread::ExecuteRingBuffer()
 					if (addr != -1)
 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
+					if (g_vu1Trace.armed)
+						vu1TraceOnMscal(VU1.VI[REG_TPC].UL << 3, vifRegs.itop, vifRegs.top);
 					CpuVU1->Execute(vu1RunCycles);
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
 					semaXGkick.Post(); // Tell MTGS a path1 packet is complete

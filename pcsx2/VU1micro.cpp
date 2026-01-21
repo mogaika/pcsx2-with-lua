@@ -8,6 +8,7 @@
 #include <cmath>
 #include "VUmicro.h"
 #include "MTVU.h"
+#include "VUops.h"
 
 #ifdef PCSX2_DEBUG
 u32 vudump = 0;
@@ -72,6 +73,10 @@ void vu1ExecMicro(u32 addr)
 	if ((s32)addr != -1) VU1.VI[REG_TPC].UL = addr & 0x7FF;
 
 	CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
+
+	if (g_vu1Trace.armed)
+		vu1TraceOnMscal(VU1.VI[REG_TPC].UL << 3, vif1Regs.itop, vif1Regs.top);
+
 	_vuExecMicroDebug(VU1);
 	if(!INSTANT_VU1)
 		CpuVU1->ExecuteBlock(1);

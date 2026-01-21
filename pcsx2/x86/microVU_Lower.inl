@@ -1698,6 +1698,7 @@ mVUop(mVU_XITOP)
 void mVU_XGKICK_(u32 addr)
 {
 	addr = (addr & 0x3ff) * 16;
+	validateXGKickPacketSize(addr);
 	u32 diff = 0x4000 - addr;
 	u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, vuRegs[1].Mem, addr, ~0u, true);
 
@@ -1863,8 +1864,11 @@ mVUop(mVU_XGKICK)
 			xAND(gprT1, 0x3FF);
 			xSHL(gprT1, 4);
 			xMOV(ptr32[&VU1.xgkickaddr], gprT1);
+			xFastCall((const void*)validateXGKickPacketSize, gprT1);
 		}
 		mVU.regAlloc->clearNeeded(regS);
+		if (isVU1)
+			xMOV(ptr32[&mVU.cyclesSinceXGKICK], 0);
 		mVU.profiler.EmitOp(opXGKICK);
 	}
 	pass3 { mVUlog("XGKICK vi%02d", _Fs_); }

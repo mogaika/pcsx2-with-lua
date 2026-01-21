@@ -1815,6 +1815,90 @@ static __ri void _vuXITOP(VURegs* VU)
 		VU->VI[_It_].US[0] = VU->GetVifRegs().itop;
 }
 
+// Forward declaration (defined below)
+static void checkXGKickDataForErrors(u32 kickAddr, bool isImmediate);
+
+void vu1InfiniteLoopDetected()
+{
+	DumpVU1StateOnGifError("VU1 exceeded 60000 cycles since last XGKICK (possible infinite loop)");
+}
+
+// Validate GIF packet and data at XGKICK issue time while VU1 state is still current.
+// Walks the GIF tag chain and dumps VU1 state if total size exceeds VU memory.
+// Also checks for NaN STQ and unknown GS registers.
+void validateXGKickPacketSize(u32 addr)
+{
+	u8* pMem = vuRegs[1].Mem;
+	u32 startAddr = addr;
+	u32 curSize = 0;
+	for (;;)
+	{
+		u32 tagAddr = addr & 0x3FFF;
+		Gif_Tag gifTag(&pMem[tagAddr]);
+		curSize += 16 + gifTag.len;
+		addr += 16 + gifTag.len;
+		if (curSize >= 0x4000)
+		{
+			DumpVU1StateOnGifError("GS packet size exceeded VU memory size (at XGKICK issue)", startAddr);
+			return;
+		}
+		if (gifTag.tag.EOP)
+			break;
+	}
+	// Also check for NaN STQ and unknown GS registers at issue time
+	checkXGKickDataForErrors(startAddr, true);
+}
+
+// kickAddr: the actual XGKICK address to check (may differ from VU1.xgkickaddr in recompiler).
+// isImmediate: true if called at XGKICK issue time (VU1 state is current),
+//              false if called during delayed transfer (VU1 state may be stale).
+static void checkXGKickDataForErrors(u32 kickAddr, bool isImmediate)
+{
+	const u32 tagAddr = kickAddr & 0x3FFF;
+	u8* vuMem = vuRegs[1].Mem;
+
+	Gif_Tag gifTag(&vuMem[tagAddr], true);
+
+	if (gifTag.tag.FLG == GIF_FLG_PACKED)
+	{
+		const char* timingNote = isImmediate ? " at issue" : " during transfer";
+		// Scan register slots for issues
+		u32 dataOff = (tagAddr + 16) & 0x3FFF;
+		for (u32 loop = 0; loop < gifTag.nLoop; loop++)
+		{
+			for (u32 r = 0; r < gifTag.nRegs; r++)
+			{
+				u8 reg = gifTag.regs[r];
+				u32 regAddr = (dataOff + (loop * gifTag.nRegs + r) * 16) & 0x3FFF;
+				u8* regData = &vuMem[regAddr];
+
+				if (reg == GIF_REG_STQ)
+				{
+					float S, T;
+					std::memcpy(&S, regData + 0, 4);
+					std::memcpy(&T, regData + 4, 4);
+					if (std::isnan(S) || std::isnan(T))
+					{
+						Console.Warning("XGKICK: NaN in STQ at VU1 mem 0x%04x (S=%g T=%g), tag@0x%04x, start_pc=0x%04x%s",
+							regAddr, S, T, tagAddr, VU1.start_pc, timingNote);
+						DumpVU1StateOnGifError("NaN in STQ (detected at XGKICK)", kickAddr);
+					}
+				}
+				else if (reg == GIF_REG_A_D)
+				{
+					u32 adReg = regData[8];
+					if (adReg >= 0x63 && adReg != 0x7f)
+					{
+						Console.Warning("XGKICK: Write to unknown GS register 0x%02x at VU1 mem 0x%04x, tag@0x%04x, start_pc=0x%04x%s",
+							adReg, regAddr, tagAddr, VU1.start_pc, timingNote);
+						DumpVU1StateOnGifError("Write to unknown GS register (detected at XGKICK)", kickAddr);
+					}
+				}
+			}
+		}
+	}
+}
+
 void _vuXGKICKTransfer(s32 cycles, bool flush)
 {
 	if (!VU1.xgkickenable)
@@ -1844,7 +1928,10 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 				break;
 			}
 			else
+			{
 				VUM_LOG("XGKICK New tag size %d bytes EOP %d", VU1.xgkicksizeremaining, VU1.xgkickendpacket);
+				checkXGKickDataForErrors(VU1.xgkickaddr, false);
+			}
 		}
 
 		if (!flush)
@@ -1925,6 +2012,8 @@ static __ri void _vuXGKICK(VURegs* VU)
 	VU->xgkickcyclecount = 1;
 	VU0.VI[REG_VPU_STAT].UL |= (1 << 12);
 	VUM_LOG("XGKICK addr %x", addr);
+
+	validateXGKickPacketSize(addr);
 }
 
 static __ri void _vuXTOP(VURegs* VU)
@@ -4046,4 +4135,249 @@ void VFCOR()   { VU0.code = cpuRegs.code; _vuFCOR(&VU0); }
 void VFCSET()  { VU0.code = cpuRegs.code; _vuFCSET(&VU0); SYNCCLIPFLAG(); }
 void VFCGET()  { VU0.code = cpuRegs.code; _vuFCGET(&VU0); }
 void VXITOP()  { VU0.code = cpuRegs.code; _vuXITOP(&VU0); }
+
+// ============================================================
+// VU1 Execution Trace Recorder
+// ============================================================
+
+VU1TraceState g_vu1Trace;
+
+static const char* vu1TraceVifCmdName(u32 cmd)
+{
+	switch (cmd & 0x7f)
+	{
+		case 0x00: return "NOP";
+		case 0x01: return "STCYCL";
+		case 0x02: return "OFFSET";
+		case 0x03: return "BASE";
+		case 0x04: return "ITOP";
+		case 0x05: return "STMOD";
+		case 0x06: return "MSKPATH3";
+		case 0x07: return "MARK";
+		case 0x10: return "FLUSHE";
+		case 0x11: return "FLUSH";
+		case 0x13: return "FLUSHA";
+		case 0x14: return "MSCAL";
+		case 0x15: return "MSCALF";
+		case 0x17: return "MSCNT";
+		case 0x20: return "STMASK";
+		case 0x30: return "STROW";
+		case 0x31: return "STCOL";
+		case 0x4a: return "MPG";
+		case 0x50: return "DIRECT";
+		case 0x51: return "DIRECTHL";
+		default:
+			if ((cmd & 0x60) == 0x60)
+				return "UNPACK";
+			return "???";
+	}
+}
+
+static const char* vu1TraceUnpackFormat(u32 cmd)
+{
+	switch ((cmd >> 24) & 0x0f)
+	{
+		case 0x0: return "S-32";
+		case 0x1: return "S-16";
+		case 0x2: return "S-8";
+		case 0x4: return "V2-32";
+		case 0x5: return "V2-16";
+		case 0x6: return "V2-8";
+		case 0x8: return "V3-32";
+		case 0x9: return "V3-16";
+		case 0xa: return "V3-8";
+		case 0xc: return "V4-32";
+		case 0xd: return "V4-16";
+		case 0xe: return "V4-8";
+		case 0xf: return "V4-5";
+		default:  return "?";
+	}
+}
+
+void vu1TraceSnapshotVifLog()
+{
+	if (!g_vu1Trace.armed)
+		return;
+	std::lock_guard<std::mutex> lock(g_vu1Trace.mutex);
+	g_vu1Trace.pendingVifLogs.push_back(std::move(g_vu1Trace.vifLog));
+	g_vu1Trace.vifLog.clear();
+}
+
+void vu1TraceOnMscal(u32 addr, u32 itop, u32 top)
+{
+	std::lock_guard<std::mutex> lock(g_vu1Trace.mutex);
+	if (!g_vu1Trace.armed || !g_vu1Trace.file)
+		return;
+
+	FILE* f = g_vu1Trace.file;
+	int n = g_vu1Trace.execCount++;
+
+	std::fprintf(f, "============================================================\n");
+	std::fprintf(f, "=== MSCAL #%d  PC=0x%04x  ITOP=0x%04x  TOP=0x%04x ===\n",
+		n, addr, itop, top);
+	std::fprintf(f, "============================================================\n\n");
+
+	const u32 flags = g_vu1Trace.flags;
+
+	// VIF command log — pop snapshot queued by EE thread
+	std::vector<VU1TraceEntry> vifLog;
+	if (!g_vu1Trace.pendingVifLogs.empty())
+	{
+		vifLog = std::move(g_vu1Trace.pendingVifLogs.front());
+		g_vu1Trace.pendingVifLogs.erase(g_vu1Trace.pendingVifLogs.begin());
+	}
+
+	if (flags & VU1_TRACE_VIF)
+	{
+		std::fprintf(f, "--- VIF Commands (%zu entries) ---\n", vifLog.size());
+		for (const auto& entry : vifLog)
+		{
+			u32 cmd = entry.vifCmd;
+			u32 cmd7 = (cmd >> 24) & 0x7f;
+			const char* name = vu1TraceVifCmdName(cmd7);
+
+			if ((cmd7 & 0x60) == 0x60)
+			{
+				// UNPACK
+				u32 vuAddr = (cmd & 0x3ff) * 16;
+				u32 num = (cmd >> 16) & 0xff;
+				std::fprintf(f, "  UNPACK %s @0x%04x num=%u  vif_addr=0x%08x dma_addr=0x%08x",
+					vu1TraceUnpackFormat(cmd), vuAddr, num, entry.vifAddr, entry.dmaAddr);
+
+				if (g_vu1Trace.zoneLookup)
+				{
+					std::string zone = g_vu1Trace.zoneLookup(entry.vifAddr);
+					if (!zone.empty())
+						std::fprintf(f, "  [%s]", zone.c_str());
+				}
+				std::fprintf(f, "\n");
+			}
+			else if (cmd7 == 0x04) // ITOP
+			{
+				std::fprintf(f, "  ITOP 0x%04x\n", cmd & 0x3ff);
+			}
+			else if (cmd7 == 0x01) // STCYCL
+			{
+				std::fprintf(f, "  STCYCL cl=%u wl=%u\n", cmd & 0xff, (cmd >> 8) & 0xff);
+			}
+			else if (cmd7 == 0x14) // MSCAL
+			{
+				std::fprintf(f, "  MSCAL 0x%04x\n", (cmd & 0xffff) * 8);
+			}
+			else if (cmd7 == 0x17) // MSCNT
+			{
+				std::fprintf(f, "  MSCNT\n");
+			}
+			else
+			{
+				std::fprintf(f, "  %s 0x%08x  vif_addr=0x%08x dma_addr=0x%08x\n", name, cmd, entry.vifAddr, entry.dmaAddr);
+			}
+		}
+		std::fprintf(f, "\n");
+	}
+
+	if (flags & VU1_TRACE_REGS)
+	{
+		std::fprintf(f, "--- Pre-execution Registers ---\n");
+		for (int i = 0; i < 32; i++)
+		{
+			const VECTOR& vf = VU1.VF[i];
+			std::fprintf(f, "  VF%02d: %12.6f %12.6f %12.6f %12.6f  (0x%08x %08x %08x %08x)\n",
+				i, vf.f.x, vf.f.y, vf.f.z, vf.f.w,
+				vf.UL[0], vf.UL[1], vf.UL[2], vf.UL[3]);
+		}
+		for (int i = 0; i < 16; i++)
+		{
+			std::fprintf(f, "  VI%02d: 0x%04x (%u)\n", i, VU1.VI[i].US[0], VU1.VI[i].US[0]);
+		}
+		std::fprintf(f, "  ACC:  %12.6f %12.6f %12.6f %12.6f\n",
+			VU1.ACC.f.x, VU1.ACC.f.y, VU1.ACC.f.z, VU1.ACC.f.w);
+		std::fprintf(f, "  Q: %f  P: %f  I: 0x%08x\n",
+			VU1.VI[REG_Q].F, VU1.VI[REG_P].F, VU1.VI[REG_I].UL);
+		std::fprintf(f, "\n");
+	}
+
+	if (flags & VU1_TRACE_MEMORY)
+	{
+		std::fprintf(f, "--- VU1 Data Memory (non-zero, 16KB) ---\n");
+		const u32* mem = (const u32*)VU1.Mem;
+		for (u32 offset = 0; offset < 16384; offset += 16)
+		{
+			const u32* row = mem + (offset / 4);
+			if (row[0] == 0 && row[1] == 0 && row[2] == 0 && row[3] == 0)
+				continue;
+			const float* frow = (const float*)row;
+			std::fprintf(f, "  0x%04x: %08x %08x %08x %08x  (%12.6f %12.6f %12.6f %12.6f)\n",
+				offset, row[0], row[1], row[2], row[3],
+				frow[0], frow[1], frow[2], frow[3]);
+		}
+		std::fprintf(f, "\n");
+	}
+
+	// Reset hit counts
+	resetVU1PcHitCounts();
+	g_vu1Trace.active = true;
+
+	std::fflush(f);
+}
+
+void vu1TraceOnFinish(u32 cyclesConsumed)
+{
+	std::lock_guard<std::mutex> lock(g_vu1Trace.mutex);
+	if (!g_vu1Trace.active || !g_vu1Trace.file)
+		return;
+
+	FILE* f = g_vu1Trace.file;
+	const u32 flags = g_vu1Trace.flags;
+
+	std::fprintf(f, "  Cycles consumed: %u\n\n", cyclesConsumed);
+
+	if (flags & VU1_TRACE_REGS)
+	{
+		std::fprintf(f, "--- Post-execution Registers ---\n");
+		for (int i = 0; i < 32; i++)
+		{
+			const VECTOR& vf = VU1.VF[i];
+			std::fprintf(f, "  VF%02d: %12.6f %12.6f %12.6f %12.6f  (0x%08x %08x %08x %08x)\n",
+				i, vf.f.x, vf.f.y, vf.f.z, vf.f.w,
+				vf.UL[0], vf.UL[1], vf.UL[2], vf.UL[3]);
+		}
+		for (int i = 0; i < 16; i++)
+		{
+			std::fprintf(f, "  VI%02d: 0x%04x (%u)\n", i, VU1.VI[i].US[0], VU1.VI[i].US[0]);
+		}
+		std::fprintf(f, "\n");
+	}
+
+	if (flags & VU1_TRACE_PC_HITS)
+	{
+		u32* hits = getVU1PcHitCounts();
+		u64 total = 0;
+		for (u32 i = 0; i < 2048; i++)
+			total += hits[i];
+
+		std::fprintf(f, "--- PC Hit Counts (total: %llu) ---\n", (unsigned long long)total);
+		for (u32 row = 0; row < 2048; row += 16)
+		{
+			bool allZero = true;
+			for (u32 j = 0; j < 16 && (row + j) < 2048; j++)
+			{
+				if (hits[row + j] > 0) { allZero = false; break; }
+			}
+			if (allZero)
+				continue;
+
+			std::fprintf(f, "  0x%04x:", row * 8);
+			for (u32 j = 0; j < 16 && (row + j) < 2048; j++)
+				std::fprintf(f, " %8u", hits[row + j]);
+			std::fprintf(f, "\n");
+		}
+		std::fprintf(f, "\n");
+	}
+
+	std::fprintf(f, "============================================================\n\n");
+
+	g_vu1Trace.active = false;
+	std::fflush(f);
+}
 

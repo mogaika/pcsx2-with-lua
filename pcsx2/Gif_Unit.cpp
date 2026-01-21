@@ -7,7 +7,137 @@
 #include "Vif_Dma.h"
 #include "MTVU.h"
 
+#include "common/Path.h"
+
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+
 Gif_Unit gifUnit;
+
+static std::atomic<bool> s_vu1DumpDone{false};
+
+void resetGifDumpFlags()
+{
+	s_vu1DumpDone.store(false);
+}
+
+void DumpVU1StateOnGifError(const char* reason, u32 kickAddr)
+{
+	// One-shot: only first error triggers a dump
+	bool expected = false;
+	if (!s_vu1DumpDone.compare_exchange_strong(expected, true))
+		return;
+
+	std::string dumpPath = Path::Combine(EmuFolders::Logs, "vu1_gif_error_dump.txt");
+	FILE* f = std::fopen(dumpPath.c_str(), "w");
+	if (!f)
+	{
+		Console.Error("DumpVU1StateOnGifError: failed to open %s", dumpPath.c_str());
+		return;
+	}
+
+	VURegs& vu1 = vuRegs[1];
+	u8* pMem = vu1.Mem;
+
+	// Use provided kick address, fall back to VU1.xgkickaddr
+	u32 actualKickAddr = (kickAddr != ~0u) ? kickAddr : vu1.xgkickaddr;
+
+	std::fprintf(f, "=== VU1 GIF Error Dump ===\n");
+	std::fprintf(f, "Reason: %s\n", reason);
+	std::fprintf(f, "EE PC: 0x%08x\n", cpuRegs.pc);
+	std::fprintf(f, "xgkickaddr (VU1 reg): 0x%04x  actual kick addr: 0x%04x  xgkickcycle: %u  VU1.cycle: %u\n",
+		vu1.xgkickaddr, actualKickAddr, vu1.xgkickcyclecount, vu1.cycle);
+	std::fprintf(f, "start_pc: 0x%04x  branch: %u  branchpc: 0x%04x\n\n",
+		vu1.start_pc, vu1.branch, vu1.branchpc);
+
+	// GIF tag chain from actual kick address
+	std::fprintf(f, "=== GIF Tag Chain from kick addr 0x%04x ===\n", actualKickAddr);
+	const char* flgNames[] = {"PACKED", "REGLIST", "IMAGE", "IMAGE2"};
+	u32 dumpOff = actualKickAddr;
+	for (u32 i = 0; i < 16; i++) // up to 16 tags to avoid infinite loop
+	{
+		u32 da = dumpOff & 0x3FFF;
+		u32* raw = (u32*)&pMem[da];
+		Gif_Tag dt(&pMem[da]);
+		std::fprintf(f, "  tag[%u] @0x%04x: %08x %08x %08x %08x  FLG=%s NLOOP=%u NREG=%u EOP=%u len=0x%x\n",
+			i, da, raw[0], raw[1], raw[2], raw[3],
+			flgNames[dt.tag.FLG & 3], dt.tag.NLOOP, dt.tag.NREG, dt.tag.EOP, dt.len);
+		dumpOff += 16 + dt.len;
+		if (dt.tag.EOP)
+			break;
+		if ((dumpOff - actualKickAddr) > 0x4000)
+		{
+			std::fprintf(f, "  ... chain exceeds VU1 memory, stopping\n");
+			break;
+		}
+	}
+
+	// VU1 registers
+	std::fprintf(f, "\n=== VU1 Registers ===\n");
+	for (int i = 0; i < 32; i++)
+		std::fprintf(f, "  VF%02d: %12.6f %12.6f %12.6f %12.6f  (0x%08x %08x %08x %08x)\n",
+			i, vu1.VF[i].f.x, vu1.VF[i].f.y, vu1.VF[i].f.z, vu1.VF[i].f.w,
+			vu1.VF[i].i.x, vu1.VF[i].i.y, vu1.VF[i].i.z, vu1.VF[i].i.w);
+	for (int i = 0; i < 16; i++)
+		std::fprintf(f, "  VI%02d: 0x%04x (%d)\n", i, vu1.VI[i].US[0], vu1.VI[i].SS[0]);
+	std::fprintf(f, "  ACC:  %12.6f %12.6f %12.6f %12.6f\n",
+		vu1.ACC.f.x, vu1.ACC.f.y, vu1.ACC.f.z, vu1.ACC.f.w);
+	std::fprintf(f, "  Q: %f  P: %f\n", vu1.q.F, vu1.p.F);
+	std::fprintf(f, "  Status: 0x%x  MAC: 0x%x  Clip: 0x%x\n",
+		vu1.statusflag, vu1.macflag, vu1.clipflag);
+
+	// VU1 data memory
+	std::fprintf(f, "\n=== VU1 Data Memory (0x4000 bytes) ===\n");
+	for (u32 a = 0; a < 0x4000; a += 16)
+	{
+		u8* p = &pMem[a];
+		float floats[4];
+		u32 u32s[4];
+		std::memcpy(floats, p, 16);
+		std::memcpy(u32s, p, 16);
+		std::fprintf(f, "  %04x:", a);
+		for (int j = 0; j < 16; j++)
+			std::fprintf(f, " %02x", p[j]);
+		std::fprintf(f, "  [%12g %12g %12g %12g]  [%08x %08x %08x %08x]",
+			floats[0], floats[1], floats[2], floats[3],
+			u32s[0], u32s[1], u32s[2], u32s[3]);
+		if (a == (actualKickAddr & 0x3FF0))
+			std::fprintf(f, "  <-- XGKICK");
+		std::fprintf(f, "\n");
+	}
+
+	// VU1 micro memory with disassembly
+	std::fprintf(f, "\n=== VU1 Micro Memory (0x4000 bytes) with disassembly ===\n");
+	for (u32 a = 0; a < 0x4000; a += 8)
+	{
+		u32* inst = (u32*)&vu1.Micro[a];
+		u32 upper = inst[1];
+		u32 lower = inst[0];
+		const char* upperStr = disVU1MicroUF(upper, a);
+		const char* lowerStr = disVU1MicroLF(lower, a);
+		bool isXgkick = ((lower & 0x3f) == 0x3c) &&
+			(((lower >> 6) & 0x1f) == 0x1b) &&
+			(((lower >> 21) & 0x3) == 0x0);
+		std::fprintf(f, "  %04x: %08x %08x  %s | %s%s\n",
+			a, upper, lower, upperStr, lowerStr,
+			isXgkick ? "  <--- XGKICK" : "");
+	}
+
+	// Binary dumps
+	std::fprintf(f, "\n=== Binary files written ===\n");
+	FILE* fb;
+	std::string dataPath = Path::Combine(EmuFolders::Logs, "vu1_data.bin");
+	fb = std::fopen(dataPath.c_str(), "wb");
+	if (fb) { std::fwrite(pMem, 1, 0x4000, fb); std::fclose(fb); std::fprintf(f, "  %s (16KB data mem)\n", dataPath.c_str()); }
+	std::string microPath = Path::Combine(EmuFolders::Logs, "vu1_micro.bin");
+	fb = std::fopen(microPath.c_str(), "wb");
+	if (fb) { std::fwrite(vu1.Micro, 1, 0x4000, fb); std::fclose(fb); std::fprintf(f, "  %s (16KB micro mem)\n", microPath.c_str()); }
+
+	std::fclose(f);
+	Console.Error("VU1 GIF error dump: %s -- start_pc=0x%04x kick_addr=0x%04x -- %s + %s + %s",
+		reason, vu1.start_pc, actualKickAddr, dumpPath.c_str(), dataPath.c_str(), microPath.c_str());
+}
 
 // Returns true on stalling SIGNAL
 bool Gif_HandlerAD(u8* pMem)

@@ -5,6 +5,7 @@
 #include "AutoUpdaterDialog.h"
 #include "CoverDownloadDialog.h"
 #include "DisplayWidget.h"
+#include "lua-mods/LuaModWindow.h"
 #include "GameList/GameListRefreshThread.h"
 #include "GameList/GameListWidget.h"
 #include "LogWindow.h"
@@ -153,6 +154,9 @@ void MainWindow::initialize()
 
 	if (Host::GetBoolSettingValue("EmuCore", "EnableMouseLock", false))
 		setupMouseMoveHandler();
+
+	// Open Game Event Log window by default
+	openLuaMods();
 }
 
 // TODO: Figure out how to set this in the .ui file
@@ -462,6 +466,7 @@ void MainWindow::connectVMThreadSignals(EmuThread* thread)
 	connect(m_ui.actionToolbarFullscreen, &QAction::triggered, thread, &EmuThread::toggleFullscreen);
 	connect(m_ui.actionToggleSoftwareRendering, &QAction::triggered, thread, &EmuThread::toggleSoftwareRendering);
 	connect(m_ui.actionDebugger, &QAction::triggered, this, &MainWindow::openDebugger);
+	connect(m_ui.actionGameEventLog, &QAction::triggered, this, &MainWindow::openLuaMods);
 	connect(m_ui.actionReloadPatches, &QAction::triggered, thread, &EmuThread::reloadPatches);
 }
 
@@ -1233,7 +1238,25 @@ void MainWindow::reportInfo(const QString& title, const QString& message)
 
 void MainWindow::reportError(const QString& title, const QString& message)
 {
-	QMessageBox::critical(this, title, message);
+	// Prevent stacking multiple modal error dialogs (e.g. rapid TLB misses).
+	// If one is already showing, append new errors to it instead.
+	static QMessageBox* s_activeErrorDialog = nullptr;
+
+	if (s_activeErrorDialog)
+	{
+		QString current = s_activeErrorDialog->text();
+		int newlineCount = current.count('\n');
+		if (newlineCount < 10)
+			s_activeErrorDialog->setText(current + QStringLiteral("\n\n") + message);
+		else if (newlineCount == 10)
+			s_activeErrorDialog->setText(current + QStringLiteral("\n\n(additional errors suppressed)"));
+		return;
+	}
+
+	QMessageBox dialog(QMessageBox::Critical, title, message, QMessageBox::Ok, this);
+	s_activeErrorDialog = &dialog;
+	dialog.exec();
+	s_activeErrorDialog = nullptr;
 }
 
 bool MainWindow::confirmMessage(const QString& title, const QString& message)
@@ -2908,6 +2931,19 @@ void MainWindow::openDebugger()
 {
 	DebuggerWindow* dwnd = DebuggerWindow::getInstance();
 	dwnd->isVisible() ? dwnd->activateWindow() : dwnd->show();
+}
+
+void MainWindow::openLuaMods()
+{
+	if (!g_lua_mod_window)
+	{
+		g_lua_mod_window = new LuaModWindow(this);
+	}
+
+	if (g_lua_mod_window->isVisible())
+		g_lua_mod_window->activateWindow();
+	else
+		g_lua_mod_window->show();
 }
 
 void MainWindow::doControllerSettings(ControllerSettingsWindow::Category category)

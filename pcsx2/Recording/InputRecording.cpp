@@ -244,6 +244,7 @@ void InputRecording::incFrameCounter()
 		// If we've reached the end of the recording while replaying, pause
 		if (m_frame_counter == m_file.getTotalFrames())
 		{
+			VMManager::SetPauseReason(VMPauseReason::InputRecording, "End of input recording");
 			VMManager::SetPaused(true);
 			// Can also stop watching for re-records, they've watched to the end of the recording
 			m_watching_for_rerecords = false;

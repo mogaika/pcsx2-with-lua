@@ -8,8 +8,12 @@
 #include "Cache.h"
 
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/MemoryTrace.h"
+#include "x86/iR5900.h"
 
 #include "common/FastJmp.h"
+
+#include "fmt/format.h"
 
 #include <float.h>
 
@@ -80,6 +84,8 @@ void intBreakpoint(bool memcheck)
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
+	VMManager::SetPauseReason(memcheck ? VMPauseReason::MemWatch : VMPauseReason::Breakpoint,
+		fmt::format("EE {} at 0x{:08x}", memcheck ? "memcheck" : "breakpoint", cpuRegs.pc), cpuRegs.pc);
 	VMManager::SetPaused(true);
 	Cpu->ExitExecution();
 }
@@ -168,6 +174,14 @@ static void execI()
 	CBreakPoints::CommitClearSkipFirst(BREAKPOINT_EE);
 #endif
 
+	// Check EE execution hooks
+	if (!getExecutionHooks().empty())
+	{
+		auto hookIt = getExecutionHooks().find(cpuRegs.pc);
+		if (hookIt != getExecutionHooks().end())
+			hookIt->second();
+	}
+
 	const u32 pc = cpuRegs.pc;
 	// We need to increase the pc before executing the memRead32. An exception could appears
 	// and it expects the PC counter to be pre-incremented
@@ -177,6 +191,27 @@ static void execI()
 	cpuRegs.code = memRead32( pc );
 
 	const OPCODE& opcode = GetCurrentInstruction();
+
+	// Check memory traces (lightweight - uses fast bitmask check)
+	if (opcode.flags & IS_MEMORY)
+	{
+		// Compute the effective address (base + signed offset)
+		u32 addr = cpuRegs.GPR.r[(cpuRegs.code >> 21) & 0x1F].UL[0];
+		if (static_cast<s16>(cpuRegs.code) != 0)
+			addr += static_cast<s16>(cpuRegs.code);
+
+		// Fast bitmask check - g_memTraceRegions[addr >> 16]
+		if (g_memTraceRegions[addr >> 16] != 0)
+		{
+			const bool isStore = (opcode.flags & IS_STORE) != 0;
+			const u32 size = getSizeFromMemtypeFlags(opcode.flags);
+
+			if (isStore)
+				MemoryTraceManager::Instance().OnMemoryWrite(addr, size, pc);
+			else
+				MemoryTraceManager::Instance().OnMemoryRead(addr, size, pc);
+		}
+	}
 #if 0
 	static long int runs = 0;
 	//use this to find out what opcodes your game uses. very slow! (rama)

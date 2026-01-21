@@ -4,9 +4,24 @@
 #include "Common.h"
 #include "Hardware.h"
 #include "MTVU.h"
+#include "VMManager.h"
 
+#include "DebugTools/MemoryTrace.h"
 #include "IPU/IPUdma.h"
 #include "ps2/HwInternal.h"
+
+#include "common/Path.h"
+
+#include "fmt/format.h"
+
+static bool s_dmaGetAddrDumped = false;
+static bool s_sprDmaGetAddrDumped = false;
+
+void resetDmaDumpFlags()
+{
+	s_dmaGetAddrDumped = false;
+	s_sprDmaGetAddrDumped = false;
+}
 
 bool DMACh::transfer(const char *s, tDMA_TAG* ptag)
 {
@@ -140,7 +155,35 @@ __fi tDMA_TAG* SPRdmaGetAddr(u32 addr, bool write)
 	}
 	else
 	{
-		Console.Error( "*PCSX2*: DMA error: %8.8x", addr);
+		Console.Error( "*PCSX2*: SPR DMA error: %8.8x PC=0x%08x", addr, cpuRegs.pc);
+		if (!s_sprDmaGetAddrDumped) {
+			s_sprDmaGetAddrDumped = true;
+			std::string dumpPath = Path::Combine(EmuFolders::Logs, "dma_error_dump.txt");
+			FILE* f = fopen(dumpPath.c_str(), "a");
+			if (f) {
+				fprintf(f, "=== SPR DMA Error: addr=0x%08x PC=0x%08x ===\n", addr, cpuRegs.pc);
+				const struct { const char* name; DMACh& ch; } channels[] = {
+					{"VIF0", vif0ch}, {"VIF1", vif1ch}, {"GIF", gifch},
+					{"IPU0", ipu0ch}, {"IPU1", ipu1ch},
+					{"SIF0", sif0ch}, {"SIF1", sif1ch}, {"SIF2", sif2dma},
+					{"SPR0", spr0ch}, {"SPR1", spr1ch}
+				};
+				for (const auto& c : channels) {
+					fprintf(f, "  %-4s: CHCR=0x%08x MADR=0x%08x QWC=0x%04x TADR=0x%08x SADR=0x%08x STR=%d\n",
+						c.name, c.ch.chcr._u32, c.ch.madr, c.ch.qwc, c.ch.tadr, c.ch.sadr, c.ch.chcr.STR);
+				}
+				fprintf(f, "  DMAC CTRL=0x%08x STAT=0x%08x\n", dmacRegs.ctrl._u32, dmacRegs.stat._u32);
+				fprintf(f, "\n");
+				fclose(f);
+				Console.Error("DMA error dump appended to %s", dumpPath.c_str());
+			}
+		}
+		if (EmuConfig.Cpu.Recompiler.PauseOnError)
+		{
+			const std::string message(fmt::format("SPR DMA error: addr=0x{:08x} PC=0x{:08x}", addr, cpuRegs.pc));
+			VMManager::SetPauseReason(VMPauseReason::DMAError, message, cpuRegs.pc);
+			VMManager::SetPaused(true);
+		}
 		return NULL;
 	}
 }
@@ -156,6 +199,8 @@ __ri tDMA_TAG *dmaGetAddr(u32 addr, bool write)
 
 	if (addr < Ps2MemSize::ExposedRam)
 	{
+		if (!write && g_memTraceRegions[addr >> 16])
+			MemoryTraceManager::Instance().OnDmaRead(addr, cpuRegs.pc);
 		return (tDMA_TAG*)&eeMem->Main[addr];
 	}
 	else if (addr < 0x10000000)
@@ -170,7 +215,35 @@ __ri tDMA_TAG *dmaGetAddr(u32 addr, bool write)
 	}
 	else
 	{
-		Console.Error( "*PCSX2*: DMA error: %8.8x", addr);
+		Console.Error( "*PCSX2*: DMA error: %8.8x (original: %8.8x) PC=0x%08x write=%d", addr, addr | (write ? 0 : 0), cpuRegs.pc, write);
+		if (!s_dmaGetAddrDumped) {
+			s_dmaGetAddrDumped = true;
+			std::string dumpPath = Path::Combine(EmuFolders::Logs, "dma_error_dump.txt");
+			FILE* f = fopen(dumpPath.c_str(), "a");
+			if (f) {
+				fprintf(f, "=== DMA Error: addr=0x%08x PC=0x%08x write=%d ===\n", addr, cpuRegs.pc, write);
+				const struct { const char* name; DMACh& ch; } channels[] = {
+					{"VIF0", vif0ch}, {"VIF1", vif1ch}, {"GIF", gifch},
+					{"IPU0", ipu0ch}, {"IPU1", ipu1ch},
+					{"SIF0", sif0ch}, {"SIF1", sif1ch}, {"SIF2", sif2dma},
+					{"SPR0", spr0ch}, {"SPR1", spr1ch}
+				};
+				for (const auto& c : channels) {
+					fprintf(f, "  %-4s: CHCR=0x%08x MADR=0x%08x QWC=0x%04x TADR=0x%08x SADR=0x%08x STR=%d\n",
+						c.name, c.ch.chcr._u32, c.ch.madr, c.ch.qwc, c.ch.tadr, c.ch.sadr, c.ch.chcr.STR);
+				}
+				fprintf(f, "  DMAC CTRL=0x%08x STAT=0x%08x\n", dmacRegs.ctrl._u32, dmacRegs.stat._u32);
+				fprintf(f, "\n");
+				fclose(f);
+				Console.Error("DMA error dump appended to %s", dumpPath.c_str());
+			}
+		}
+		if (EmuConfig.Cpu.Recompiler.PauseOnError)
+		{
+			const std::string message(fmt::format("DMA error: addr=0x{:08x} PC=0x{:08x} write={}", addr, cpuRegs.pc, write));
+			VMManager::SetPauseReason(VMPauseReason::DMAError, message, cpuRegs.pc);
+			VMManager::SetPaused(true);
+		}
 		return NULL;
 	}
 }
