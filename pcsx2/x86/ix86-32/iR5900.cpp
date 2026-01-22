@@ -106,6 +106,7 @@ static void recExitExecution();
 // EE Execution Hook System
 #include <map>
 std::map<u32, execution_hook_t> s_execution_hooks;
+bool g_executionHookSkipBlock = false;
 
 void addExecutionHook(u32 addr, execution_hook_t hook)
 {
@@ -122,15 +123,8 @@ void clearExecutionHooks()
 	s_execution_hooks.clear();
 }
 
-static void encodeExecutionHook()
-{
-	auto it = s_execution_hooks.find(pc);
-	if (it == s_execution_hooks.end())
-		return;
-
-	iFlushCall(FLUSH_EVERYTHING | FLUSH_PC);
-	xFastCall((void*)it->second);
-}
+// encodeExecutionHook is defined later (after DispatcherReg)
+static void encodeExecutionHook();
 
 #ifdef TRACE_BLOCKS
 static void pauseAAA()
@@ -392,6 +386,31 @@ static void recEventTest()
 		eeRecExitRequested = false;
 		recExitExecution();
 	}
+}
+
+// Implementation of encodeExecutionHook (needs DispatcherReg to be defined)
+static void encodeExecutionHook()
+{
+	auto it = s_execution_hooks.find(pc);
+	if (it == s_execution_hooks.end())
+		return;
+
+	iFlushCall(FLUSH_EVERYTHING | FLUSH_PC);
+
+	// Reset skip flag before calling hook
+	xMOV(ptr8[&g_executionHookSkipBlock], 0);
+
+	// Call the hook
+	xFastCall((void*)it->second);
+
+	// Check if hook wants to skip block execution
+	xCMP(ptr8[&g_executionHookSkipBlock], 0);
+	xForwardJE8 continueBlock;
+
+	// Hook set skip flag - jump to dispatcher (cpuRegs.pc should be set by hook)
+	xJMP(DispatcherReg);
+
+	continueBlock.SetTarget();
 }
 
 // The address for all cleared blocks.  It recompiles the current pc and then

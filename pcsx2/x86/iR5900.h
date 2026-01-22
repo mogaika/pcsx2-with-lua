@@ -78,6 +78,9 @@ void addExecutionHook(u32 addr, execution_hook_t hook);
 void removeExecutionHook(u32 addr);
 void clearExecutionHooks();
 
+// Flag set by hook to skip block execution and jump to dispatcher
+extern bool g_executionHookSkipBlock;
+
 namespace R5900
 {
 	namespace Dynarec

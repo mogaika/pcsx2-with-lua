@@ -5,8 +5,12 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include <QtCore/QFile>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPlainTextEdit>
+
+#include <map>
+#include <utility>
 
 class GameEventLogWindow : public QMainWindow
 {
@@ -19,8 +23,24 @@ public:
 	static void updateSettings();
 	static void destroy();
 
-	// Thread-safe logging function called from emulation thread
+	// Thread-safe logging functions called from emulation thread
 	static void logCommand(u16 cmdType, u16 param2, u32 param3, const char* name);
+	static void logFileOpen(u32 sysFilePtr, const char* filename, u32 mode);
+	static void logFileRead(u32 sysFilePtr, u32 handle, u32 buffer, u32 amount, u32 position);
+	static void logFileClose(u32 sysFilePtr, u32 handle);
+	static void logWadProcess(const char* wadName);
+
+	// WAD injection
+	static void setCustomWadDirectory(const QString& dir);
+	static QString customWadDirectory();
+	static void logInjectionMessage(const QString& message);
+
+	// Magic handle value to identify injected files
+	static constexpr s32 INJECTED_HANDLE_MAGIC = -100;
+
+	// Map: sysFile EE pointer -> (host QFile*, filename)
+	static std::map<u32, std::pair<QFile*, QString>> s_injectedFiles;
+	static QString s_customWadDirectory;
 
 protected:
 	void closeEvent(QCloseEvent* event) override;
@@ -28,7 +48,9 @@ protected:
 private Q_SLOTS:
 	void onClearTriggered();
 	void onSaveTriggered();
+	void onSetWadDirectoryTriggered();
 	void appendCommand(quint32 cmdType, quint32 param2, quint32 param3, const QString& name);
+	void appendMessage(const QString& message);
 
 private:
 	static constexpr int DEFAULT_WIDTH = 600;
