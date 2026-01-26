@@ -5,6 +5,7 @@
 #include "MainWindow.h"
 #include "QtHost.h"
 
+#include "DebugTools/MemoryTrace.h"
 #include "Memory.h"
 #include "R5900.h"
 #include "x86/iR5900.h"
@@ -18,8 +19,10 @@
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QScrollBar>
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 GameEventLogWindow* g_game_event_log_window = nullptr;
 static std::mutex s_game_event_log_mutex;
@@ -27,6 +30,7 @@ static std::mutex s_game_event_log_mutex;
 // Static member definitions for WAD injection
 std::map<u32, std::pair<QFile*, QString>> GameEventLogWindow::s_injectedFiles;
 QString GameEventLogWindow::s_customWadDirectory;
+bool GameEventLogWindow::s_fileReadLogsEnabled = false;
 
 void GameEventLogWindow::setCustomWadDirectory(const QString& dir)
 {
@@ -36,6 +40,16 @@ void GameEventLogWindow::setCustomWadDirectory(const QString& dir)
 QString GameEventLogWindow::customWadDirectory()
 {
 	return s_customWadDirectory;
+}
+
+bool GameEventLogWindow::isFileReadLogsEnabled()
+{
+	return s_fileReadLogsEnabled;
+}
+
+void GameEventLogWindow::setFileReadLogsEnabled(bool enabled)
+{
+	s_fileReadLogsEnabled = enabled;
 }
 
 void GameEventLogWindow::logInjectionMessage(const QString& message)
@@ -73,6 +87,102 @@ static void hookWadEventAdded()
 	}
 
 	GameEventLogWindow::logCommand(cmdType, param2, param3, name);
+}
+
+// Hook for svrClientParm::IFFProcessClientParm at 0x01789e0
+// Signature: void IFFProcessClientParm(Header* HeaderPtr, char* DataPtr)
+// - a0 = HeaderPtr (contains resource name at +8, 24 chars)
+// - a1 = DataPtr (this is what we want to trace)
+// DataPtr structure: { u32 magic, ..., data at +0x40 with size 0x10 }
+// Filter: magic == 0x00020001
+static void hookIFFProcessClientParm()
+{
+	u32 headerPtr = cpuRegs.GPR.n.a0.UL[0];  // Header* HeaderPtr
+	u32 dataPtr = cpuRegs.GPR.n.a1.UL[0];    // char* DataPtr
+
+	if (dataPtr == 0)
+		return;
+
+	// Read magic from DataPtr (first u32)
+	u32 magic = *(u32*)PSM(dataPtr);
+
+	// Filter by magic - only trace resources with magic 0x00020001
+	// (Add more magic values here as needed)
+	if (magic != 0x00020001)
+		return;
+
+	// Get resource name from HeaderPtr + 8 (24 char name)
+	QString resourceName;
+	if (headerPtr != 0)
+	{
+		const char* namePtr = (const char*)PSM(headerPtr + 8);
+		if (namePtr)
+			resourceName = QString::fromLatin1(namePtr, strnlen(namePtr, 24));
+	}
+
+	// The data we want to trace is at DataPtr + 0x00, size 0x5c
+	u32 traceStart = dataPtr + 0x00;
+	u32 traceSize = 0x5c;
+
+	GameEventLogWindow::logInjectionMessage(
+		QString("[TRACE_ADD] name='%1' magic=0x%2 dataPtr=0x%3 tracing 0x%4-0x%5\n")
+			.arg(resourceName)
+			.arg(magic, 8, 16, QChar('0'))
+			.arg(dataPtr, 8, 16, QChar('0'))
+			.arg(traceStart, 8, 16, QChar('0'))
+			.arg(traceStart + traceSize, 8, 16, QChar('0')));
+
+	// Add trace with STOP_ON_WRITE flag - trace stops and reports when memory is reused
+	// Store the resource name as userData (allocated, will be freed in callback)
+	std::string* descriptionPtr = new std::string(
+		QString("ClientParm '%1' magic=0x%2")
+			.arg(resourceName)
+			.arg(magic, 8, 16, QChar('0')).toStdString());
+
+	MemoryTraceManager::Instance().AddTrace(
+		traceStart, traceSize,
+		*descriptionPtr,
+		[](u32 start, u32 end, const std::map<u32, MemoryAccessInfo>& reads,
+		   const std::map<u32, MemoryAccessInfo>& writes, u32 writePC, void* userData) {
+			// Get the description from userData
+			std::string* desc = static_cast<std::string*>(userData);
+			QString description = desc ? QString::fromStdString(*desc) : QString();
+			delete desc;  // Clean up
+
+			// Report results when overwritten
+			QString msg = QString("[TRACE_RESULT] %1 Region 0x%2-0x%3\n")
+				.arg(description)
+				.arg(start, 8, 16, QChar('0'))
+				.arg(end, 8, 16, QChar('0'));
+
+			if (writePC)
+				msg += QString("  Overwritten at PC=0x%1\n").arg(writePC, 8, 16, QChar('0'));
+
+			msg += QString("  Unique addresses read: %1\n").arg(reads.size());
+
+			// Show all reads with their PCs (for small traced regions)
+			for (const auto& [addr, info] : reads) {
+				msg += QString("  Addr 0x%1: %2 total reads from:\n")
+					.arg(addr, 8, 16, QChar('0'))
+					.arg(info.count);
+
+				// Sort PCs by read count
+				std::vector<std::pair<u32, u32>> pcSorted(info.pcCounts.begin(), info.pcCounts.end());
+				std::sort(pcSorted.begin(), pcSorted.end(),
+					[](const auto& a, const auto& b) { return a.second > b.second; });
+
+				for (const auto& [pc, count] : pcSorted) {
+					msg += QString("      PC=0x%1: %2 times\n")
+						.arg(pc, 8, 16, QChar('0'))
+						.arg(count);
+				}
+			}
+
+			GameEventLogWindow::logInjectionMessage(msg);
+		},
+		MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE,  // Stop and report when memory reused
+		descriptionPtr  // Pass description as userData
+	);
 }
 
 // Hook for sysFile::OpenResource at 0x17ad70
@@ -458,6 +568,10 @@ void GameEventLogWindow::logFileRead(u32 sysFilePtr, u32 handle, u32 buffer, u32
 	if (!g_game_event_log_window)
 		return;
 
+	// Skip if file read logs are disabled
+	if (!s_fileReadLogsEnabled)
+		return;
+
 	QString msg = QStringLiteral("[FILE_READ] sysFile=0x%1 handle=%2 buffer=0x%3 amount=%4 pos=%5\n")
 		.arg(sysFilePtr, 8, 16, QChar('0'))
 		.arg(handle)
@@ -656,6 +770,14 @@ void GameEventLogWindow::createUi()
 	action = inject_menu->addAction(tr("Set Custom WAD &Directory..."));
 	connect(action, &QAction::triggered, this, &GameEventLogWindow::onSetWadDirectoryTriggered);
 
+	QMenu* view_menu = menu->addMenu(tr("&View"));
+	m_fileReadLogsAction = view_menu->addAction(tr("&File Read Logs"));
+	m_fileReadLogsAction->setCheckable(true);
+	m_fileReadLogsAction->setChecked(s_fileReadLogsEnabled);
+	connect(m_fileReadLogsAction, &QAction::toggled, this, [](bool checked) {
+		s_fileReadLogsEnabled = checked;
+	});
+
 	m_text = new QPlainTextEdit(this);
 	m_text->setReadOnly(true);
 	m_text->setUndoRedoEnabled(false);
@@ -734,6 +856,9 @@ void GameEventLogWindow::initHooks()
 	addExecutionHook(0x17AFE0, hookSysFileRead);          // sysFile::Read
 	addExecutionHook(0x17AEE8, hookSysFileClose);         // sysFile::Close
 	addExecutionHook(0x185F28, hookWadLoaderProcessWadFile); // wadLoader::ProcessWadFile
+
+	// Memory trace hook for resource parsing analysis
+	addExecutionHook(0x01789e0, hookIFFProcessClientParm);  // IFFProcessClientParm
 }
 
 void GameEventLogWindow::shutdownHooks()
@@ -745,4 +870,8 @@ void GameEventLogWindow::shutdownHooks()
 	removeExecutionHook(0x17AFE0);
 	removeExecutionHook(0x17AEE8);
 	removeExecutionHook(0x185F28);
+	removeExecutionHook(0x01789e0);
+
+	// Flush any remaining memory traces
+	MemoryTraceManager::Instance().FlushAllTraces();
 }

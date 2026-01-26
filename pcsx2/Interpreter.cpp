@@ -8,6 +8,7 @@
 #include "Cache.h"
 
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/MemoryTrace.h"
 #include "x86/iR5900.h"
 
 #include "common/FastJmp.h"
@@ -155,6 +156,20 @@ void intCheckMemcheck()
 	}
 }
 
+// Helper function to get memory access size from opcode flags
+static u32 getSizeFromMemtypeFlags(u32 flags)
+{
+	switch (flags & MEMTYPE_MASK)
+	{
+		case MEMTYPE_BYTE:  return 1;
+		case MEMTYPE_HALF:  return 2;
+		case MEMTYPE_WORD:  return 4;
+		case MEMTYPE_DWORD: return 8;
+		case MEMTYPE_QWORD: return 16;
+		default:            return 4;
+	}
+}
+
 static void execI()
 {
 	// execI is called for every instruction so it must remains as light as possible.
@@ -190,6 +205,38 @@ static void execI()
 	cpuRegs.code = memRead32( pc );
 
 	const OPCODE& opcode = GetCurrentInstruction();
+
+	// Check memory traces (lightweight - only if traces active)
+	if (MemoryTraceManager::Instance().HasActiveTraces())
+	{
+		if (opcode.flags & IS_MEMORY)
+		{
+			// Compute the effective address (base + signed offset)
+			u32 addr = cpuRegs.GPR.r[(cpuRegs.code >> 21) & 0x1F].UL[0];
+			if (static_cast<s16>(cpuRegs.code) != 0)
+				addr += static_cast<s16>(cpuRegs.code);
+
+			// Check if this address is in a traced page
+			if (MemoryTraceManager::Instance().IsPageTraced(addr))
+			{
+				const bool isStore = (opcode.flags & IS_STORE) != 0;
+				const u32 size = getSizeFromMemtypeFlags(opcode.flags);
+
+				// Debug: log the first few accesses to traced pages
+				static u32 s_traceHitCount = 0;
+				if (s_traceHitCount < 10)
+				{
+					Console.WriteLn("[MemTrace] HIT #%u: PC=0x%08X addr=0x%08X size=%u %s",
+						++s_traceHitCount, pc, addr, size, isStore ? "WRITE" : "READ");
+				}
+
+				if (isStore)
+					MemoryTraceManager::Instance().OnMemoryWrite(addr, size, pc);
+				else
+					MemoryTraceManager::Instance().OnMemoryRead(addr, size, pc);
+			}
+		}
+	}
 #if 0
 	static long int runs = 0;
 	//use this to find out what opcodes your game uses. very slow! (rama)

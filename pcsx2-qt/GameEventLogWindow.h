@@ -30,6 +30,10 @@ public:
 	static void logFileClose(u32 sysFilePtr, u32 handle);
 	static void logWadProcess(const char* wadName);
 
+	// Log filtering
+	static bool isFileReadLogsEnabled();
+	static void setFileReadLogsEnabled(bool enabled);
+
 	// WAD injection
 	static void setCustomWadDirectory(const QString& dir);
 	static QString customWadDirectory();
@@ -65,7 +69,10 @@ private:
 	static void shutdownHooks();
 
 	QPlainTextEdit* m_text;
+	QAction* m_fileReadLogsAction = nullptr;
 	bool m_destroying = false;
+
+	static bool s_fileReadLogsEnabled;
 };
 
 extern GameEventLogWindow* g_game_event_log_window;
