@@ -206,35 +206,24 @@ static void execI()
 
 	const OPCODE& opcode = GetCurrentInstruction();
 
-	// Check memory traces (lightweight - only if traces active)
-	if (MemoryTraceManager::Instance().HasActiveTraces())
+	// Check memory traces (lightweight - uses fast bitmask check)
+	if (opcode.flags & IS_MEMORY)
 	{
-		if (opcode.flags & IS_MEMORY)
+		// Compute the effective address (base + signed offset)
+		u32 addr = cpuRegs.GPR.r[(cpuRegs.code >> 21) & 0x1F].UL[0];
+		if (static_cast<s16>(cpuRegs.code) != 0)
+			addr += static_cast<s16>(cpuRegs.code);
+
+		// Fast bitmask check - g_memTraceRegions[addr >> 16]
+		if (g_memTraceRegions[addr >> 16] != 0)
 		{
-			// Compute the effective address (base + signed offset)
-			u32 addr = cpuRegs.GPR.r[(cpuRegs.code >> 21) & 0x1F].UL[0];
-			if (static_cast<s16>(cpuRegs.code) != 0)
-				addr += static_cast<s16>(cpuRegs.code);
+			const bool isStore = (opcode.flags & IS_STORE) != 0;
+			const u32 size = getSizeFromMemtypeFlags(opcode.flags);
 
-			// Check if this address is in a traced page
-			if (MemoryTraceManager::Instance().IsPageTraced(addr))
-			{
-				const bool isStore = (opcode.flags & IS_STORE) != 0;
-				const u32 size = getSizeFromMemtypeFlags(opcode.flags);
-
-				// Debug: log the first few accesses to traced pages
-				static u32 s_traceHitCount = 0;
-				if (s_traceHitCount < 10)
-				{
-					Console.WriteLn("[MemTrace] HIT #%u: PC=0x%08X addr=0x%08X size=%u %s",
-						++s_traceHitCount, pc, addr, size, isStore ? "WRITE" : "READ");
-				}
-
-				if (isStore)
-					MemoryTraceManager::Instance().OnMemoryWrite(addr, size, pc);
-				else
-					MemoryTraceManager::Instance().OnMemoryRead(addr, size, pc);
-			}
+			if (isStore)
+				MemoryTraceManager::Instance().OnMemoryWrite(addr, size, pc);
+			else
+				MemoryTraceManager::Instance().OnMemoryRead(addr, size, pc);
 		}
 	}
 #if 0

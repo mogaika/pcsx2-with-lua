@@ -12,12 +12,17 @@
 
 #include <QtCore/QDir>
 #include <QtCore/QFileInfo>
+#include <QtCore/QTimer>
 #include <QtCore/QUtf8StringView>
 #include <QtGui/QIcon>
 #include <QtWidgets/QFileDialog>
+#include <QtWidgets/QHeaderView>
 #include <QtWidgets/QMenuBar>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QScrollBar>
+#include <QtWidgets/QSplitter>
+#include <QtWidgets/QTableWidget>
+#include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
 #include <cstring>
@@ -72,14 +77,12 @@ void GameEventLogWindow::logInjectionMessage(const QString& message)
 // Hook callback for GameWadLoader::AddCommand at 0x001bb0f8
 static void hookWadEventAdded()
 {
-	u16 cmdType = cpuRegs.GPR.n.a0.US[0];      // param_1: command type (short)
-	u16 param2 = cpuRegs.GPR.n.a1.US[0];       // param_2
-	u32 param3 = cpuRegs.GPR.n.a2.UL[0];       // param_3
+	u16 cmdType = cpuRegs.GPR.n.a0.US[0];
+	u16 param2 = cpuRegs.GPR.n.a1.US[0];
+	u32 param3 = cpuRegs.GPR.n.a2.UL[0];
 
-	// Only certain commands have a valid name string in a3
-	// Load commands (3, 6, 9, 12) use the name, unload commands don't
 	const char* name = nullptr;
-	if (cmdType == 3 || cmdType == 9) // load scene wad, load slot wad
+	if (cmdType == 3 || cmdType == 9)
 	{
 		u32 namePtr = cpuRegs.GPR.n.a3.UL[0];
 		if (namePtr != 0)
@@ -89,126 +92,79 @@ static void hookWadEventAdded()
 	GameEventLogWindow::logCommand(cmdType, param2, param3, name);
 }
 
+// Hook ID for memory tracing
+static u32 s_clientParmHookId = 0;
+
+// Callback for hook results (called on write detection)
+static void onClientParmTraceResult(const HookTrace& trace)
+{
+	if (trace.firstWritePC != 0)
+	{
+		GameEventLogWindow::logInjectionMessage(
+			QString("[TRACE] Overwritten at PC=0x%1\n").arg(trace.firstWritePC, 8, 16, QChar('0')));
+	}
+}
+
 // Hook for svrClientParm::IFFProcessClientParm at 0x01789e0
-// Signature: void IFFProcessClientParm(Header* HeaderPtr, char* DataPtr)
-// - a0 = HeaderPtr (contains resource name at +8, 24 chars)
-// - a1 = DataPtr (this is what we want to trace)
-// DataPtr structure: { u32 magic, ..., data at +0x40 with size 0x10 }
-// Filter: magic == 0x00020001
 static void hookIFFProcessClientParm()
 {
-	u32 headerPtr = cpuRegs.GPR.n.a0.UL[0];  // Header* HeaderPtr
-	u32 dataPtr = cpuRegs.GPR.n.a1.UL[0];    // char* DataPtr
+	u32 headerPtr = cpuRegs.GPR.n.a0.UL[0];
+	u32 dataPtr = cpuRegs.GPR.n.a1.UL[0];
 
-	if (dataPtr == 0)
+	if (dataPtr == 0 || s_clientParmHookId == 0)
 		return;
 
-	// Read magic from DataPtr (first u32)
 	u32 magic = *(u32*)PSM(dataPtr);
-
-	// Filter by magic - only trace resources with magic 0x00020001
-	// (Add more magic values here as needed)
 	if (magic != 0x00020001)
 		return;
 
-	// Get resource name from HeaderPtr + 8 (24 char name)
-	QString resourceName;
-	if (headerPtr != 0)
-	{
-		const char* namePtr = (const char*)PSM(headerPtr + 8);
-		if (namePtr)
-			resourceName = QString::fromLatin1(namePtr, strnlen(namePtr, 24));
-	}
-
-	// The data we want to trace is at DataPtr + 0x00, size 0x5c
 	u32 traceStart = dataPtr + 0x00;
 	u32 traceSize = 0x5c;
 
-	GameEventLogWindow::logInjectionMessage(
-		QString("[TRACE_ADD] name='%1' magic=0x%2 dataPtr=0x%3 tracing 0x%4-0x%5\n")
-			.arg(resourceName)
-			.arg(magic, 8, 16, QChar('0'))
-			.arg(dataPtr, 8, 16, QChar('0'))
-			.arg(traceStart, 8, 16, QChar('0'))
-			.arg(traceStart + traceSize, 8, 16, QChar('0')));
+	MemoryTraceManager::Instance().AddTracedRange(s_clientParmHookId, traceStart, traceSize);
+}
 
-	// Add trace with STOP_ON_WRITE flag - trace stops and reports when memory is reused
-	// Store the resource name as userData (allocated, will be freed in callback)
-	std::string* descriptionPtr = new std::string(
-		QString("ClientParm '%1' magic=0x%2")
-			.arg(resourceName)
-			.arg(magic, 8, 16, QChar('0')).toStdString());
+// Hook at 0x00133fec (after strcpy) to trace s0 register
+// Context:
+//   00133fe0 addiu   param_1,s0,0xc
+//   00133fe4 jal     strcpy
+//   00133fe8 addiu   param_2,s7,0x8
+//   00133fec b       LAB_00134300  <-- hook here
+//   00133ff0 move    v0,s0
+static void hookAfterStrcpy()
+{
+	if (s_clientParmHookId == 0)
+		return;
 
-	MemoryTraceManager::Instance().AddTrace(
-		traceStart, traceSize,
-		*descriptionPtr,
-		[](u32 start, u32 end, const std::map<u32, MemoryAccessInfo>& reads,
-		   const std::map<u32, MemoryAccessInfo>& writes, u32 writePC, void* userData) {
-			// Get the description from userData
-			std::string* desc = static_cast<std::string*>(userData);
-			QString description = desc ? QString::fromStdString(*desc) : QString();
-			delete desc;  // Clean up
+	u32 s0 = cpuRegs.GPR.n.s0.UL[0];
+	if (s0 == 0)
+		return;
 
-			// Report results when overwritten
-			QString msg = QString("[TRACE_RESULT] %1 Region 0x%2-0x%3\n")
-				.arg(description)
-				.arg(start, 8, 16, QChar('0'))
-				.arg(end, 8, 16, QChar('0'));
+	u32 traceStart = s0;
+	u32 traceSize = 0x5c;
 
-			if (writePC)
-				msg += QString("  Overwritten at PC=0x%1\n").arg(writePC, 8, 16, QChar('0'));
-
-			msg += QString("  Unique addresses read: %1\n").arg(reads.size());
-
-			// Show all reads with their PCs (for small traced regions)
-			for (const auto& [addr, info] : reads) {
-				msg += QString("  Addr 0x%1: %2 total reads from:\n")
-					.arg(addr, 8, 16, QChar('0'))
-					.arg(info.count);
-
-				// Sort PCs by read count
-				std::vector<std::pair<u32, u32>> pcSorted(info.pcCounts.begin(), info.pcCounts.end());
-				std::sort(pcSorted.begin(), pcSorted.end(),
-					[](const auto& a, const auto& b) { return a.second > b.second; });
-
-				for (const auto& [pc, count] : pcSorted) {
-					msg += QString("      PC=0x%1: %2 times\n")
-						.arg(pc, 8, 16, QChar('0'))
-						.arg(count);
-				}
-			}
-
-			GameEventLogWindow::logInjectionMessage(msg);
-		},
-		MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE,  // Stop and report when memory reused
-		descriptionPtr  // Pass description as userData
-	);
+	MemoryTraceManager::Instance().AddTracedRange(s_clientParmHookId, traceStart, traceSize);
 }
 
 // Hook for sysFile::OpenResource at 0x17ad70
-// Signature: sysFile::OpenResource(sysFile* this, char* filename, uint mode)
-// Returns: uint (1=success, 0=fail) in v0
 static void hookSysFileOpenResource()
 {
-	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];     // sysFile* this
-	u32 filenamePtr = cpuRegs.GPR.n.a1.UL[0]; // char* filename
-	u32 mode = cpuRegs.GPR.n.a2.UL[0];        // mode flags
+	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];
+	u32 filenamePtr = cpuRegs.GPR.n.a1.UL[0];
+	u32 mode = cpuRegs.GPR.n.a2.UL[0];
 
 	const char* filename = nullptr;
 	if (filenamePtr != 0)
 		filename = (const char*)PSM(filenamePtr);
 
-	// Check if we have a custom WAD directory configured
 	if (filename && !GameEventLogWindow::s_customWadDirectory.isEmpty())
 	{
 		QString qFilename = QString::fromLatin1(filename);
 		QString targetName = qFilename + QStringLiteral(".WAD");
 
-		// Case-insensitive file search in the custom directory
 		QDir customDir(GameEventLogWindow::s_customWadDirectory);
 		QString foundPath;
 
-		// First try exact match for performance
 		QString exactPath = customDir.filePath(targetName);
 		if (QFileInfo::exists(exactPath))
 		{
@@ -216,7 +172,6 @@ static void hookSysFileOpenResource()
 		}
 		else
 		{
-			// Search directory for case-insensitive match
 			QStringList entries = customDir.entryList(QDir::Files);
 			for (const QString& entry : entries)
 			{
@@ -233,198 +188,121 @@ static void hookSysFileOpenResource()
 			QFile* file = new QFile(foundPath);
 			if (file->open(QIODevice::ReadOnly))
 			{
-				// Get sysFile structure in EE memory
-				// struct sysFile { int fHandle; uint fFlags; int fLength; uint fPosition; void* vtbl; }
 				u32* sysFile = (u32*)PSM(thisPtr);
+				sysFile[0] = (u32)GameEventLogWindow::INJECTED_HANDLE_MAGIC;
+				sysFile[1] = mode | 0x200;
+				sysFile[2] = (u32)file->size();
+				sysFile[3] = 0;
 
-				// Set up sysFile structure
-				// Force sync mode (0x200) for injected files so IsReadDone always returns true
-				// This prevents the game from polling in an infinite loop waiting for async completion
-				sysFile[0] = (u32)GameEventLogWindow::INJECTED_HANDLE_MAGIC;  // fHandle = -100
-				sysFile[1] = mode | 0x200;                                     // fFlags with sync bit
-				sysFile[2] = (u32)file->size();                                // fLength
-				sysFile[3] = 0;                                                // fPosition
-
-				// Track this file
 				GameEventLogWindow::s_injectedFiles[thisPtr] = {file, qFilename};
 
-				// Log injection with flags (mode | 0x200 for sync)
 				GameEventLogWindow::logInjectionMessage(
-					QStringLiteral("[WAD_INJECT] Opened custom: %1 (%2 bytes, flags=0x%3)\n")
+					QStringLiteral("[WAD_INJECT] Opened: %1 (%2 bytes)\n")
 						.arg(foundPath)
-						.arg(file->size())
-						.arg(mode | 0x200, 8, 16, QChar('0')));
+						.arg(file->size()));
 
-				// Set return value (1 = success)
 				cpuRegs.GPR.n.v0.UL[0] = 1;
-
-				// Skip original function - set PC to return address and signal to skip block
 				cpuRegs.pc = cpuRegs.GPR.n.ra.UL[0];
 				g_executionHookSkipBlock = true;
 				return;
 			}
-			else
-			{
-				// File exists but failed to open
-				GameEventLogWindow::logInjectionMessage(
-					QStringLiteral("[WAD_INJECT] ERROR: Failed to open file: %1 (error: %2)\n")
-						.arg(foundPath)
-						.arg(file->errorString()));
-				delete file;
-			}
-		}
-		else
-		{
-			// Log that we checked but file doesn't exist in custom directory
-			GameEventLogWindow::logInjectionMessage(
-				QStringLiteral("[WAD_INJECT] Not found in custom dir: %1 (looking for %2)\n")
-					.arg(GameEventLogWindow::s_customWadDirectory)
-					.arg(targetName));
+			delete file;
 		}
 	}
 
-	// No custom file or injection failed - log and let original function run
 	GameEventLogWindow::logFileOpen(thisPtr, filename, mode);
 }
 
 // Hook for sysFile::Read at 0x17afe0
-// Signature: sysFile::Read(sysFile* this, void* buffer, uint amount)
-// Returns: uint bytes_read in v0
 static void hookSysFileRead()
 {
-	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];    // sysFile* this
-	u32 bufferPtr = cpuRegs.GPR.n.a1.UL[0];  // void* buffer
-	u32 amount = cpuRegs.GPR.n.a2.UL[0];     // uint amount
+	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];
+	u32 bufferPtr = cpuRegs.GPR.n.a1.UL[0];
+	u32 amount = cpuRegs.GPR.n.a2.UL[0];
 
-	// Read sysFile fields: fHandle at +0x00, fPosition at +0x0c
 	s32 fHandle = *(s32*)PSM(thisPtr + 0x00);
 	u32 fPosition = *(u32*)PSM(thisPtr + 0x0c);
 
-	// Check if this is an injected file
 	if (fHandle == GameEventLogWindow::INJECTED_HANDLE_MAGIC)
 	{
 		auto it = GameEventLogWindow::s_injectedFiles.find(thisPtr);
 		if (it != GameEventLogWindow::s_injectedFiles.end())
 		{
 			QFile* file = it->second.first;
-			QString& filename = it->second.second;
 			u32* sysFile = (u32*)PSM(thisPtr);
 
-			u32 fLength = sysFile[2];    // +0x08
-			u32 fPos = sysFile[3];       // +0x0c
+			u32 fLength = sysFile[2];
+			u32 fPos = sysFile[3];
 
-			// Clamp read to remaining bytes
 			u32 remaining = fLength - fPos;
-			u32 requestedAmount = amount;
 			if (amount > remaining)
 				amount = remaining;
 
 			u32 bytesRead = 0;
 			if (amount > 0)
 			{
-				// Seek to position
 				file->seek(fPos);
-
-				// Read data
 				QByteArray data = file->read(amount);
 				bytesRead = (u32)data.size();
 
-				// Copy to EE memory
 				u8* eeBuffer = (u8*)PSM(bufferPtr);
 				std::memcpy(eeBuffer, data.data(), bytesRead);
 
-				// Update position
 				sysFile[3] = fPos + bytesRead;
 			}
 
-			// Log the read operation (only log significant reads to avoid spam)
-			u32 fFlags = sysFile[1];
-			if (bytesRead == 0 || fPos == 0 || fPos + bytesRead >= fLength)
-			{
-				GameEventLogWindow::logInjectionMessage(
-					QStringLiteral("[WAD_INJECT] Read %1: pos=%2 req=%3 read=%4 len=%5 flags=0x%6\n")
-						.arg(filename)
-						.arg(fPos)
-						.arg(requestedAmount)
-						.arg(bytesRead)
-						.arg(fLength)
-						.arg(fFlags, 8, 16, QChar('0')));
-			}
-
-			// Set return value
 			cpuRegs.GPR.n.v0.UL[0] = bytesRead;
-
-			// Skip original function
 			cpuRegs.pc = cpuRegs.GPR.n.ra.UL[0];
 			g_executionHookSkipBlock = true;
 			return;
 		}
-		else
-		{
-			// Handle has magic value but not in our map - this is an error
-			GameEventLogWindow::logInjectionMessage(
-				QStringLiteral("[WAD_INJECT] ERROR: Magic handle but sysFile=0x%1 not tracked!\n")
-					.arg(thisPtr, 8, 16, QChar('0')));
-		}
 	}
 
-	// Not injected - log and let original run
 	GameEventLogWindow::logFileRead(thisPtr, (u32)fHandle, bufferPtr, amount, fPosition);
 }
 
 // Hook for sysFile::Close at 0x17aee8
-// Returns: void
 static void hookSysFileClose()
 {
 	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];
 	s32 fHandle = *(s32*)PSM(thisPtr + 0x00);
 
-	// Check if this is an injected file
 	if (fHandle == GameEventLogWindow::INJECTED_HANDLE_MAGIC)
 	{
 		auto it = GameEventLogWindow::s_injectedFiles.find(thisPtr);
 		if (it != GameEventLogWindow::s_injectedFiles.end())
 		{
 			QString filename = it->second.second;
-			delete it->second.first;  // Close QFile
+			delete it->second.first;
 			GameEventLogWindow::s_injectedFiles.erase(it);
 
-			// Clear sysFile handle
 			*(s32*)PSM(thisPtr + 0x00) = -1;
 
-			// Log closure
 			GameEventLogWindow::logInjectionMessage(
 				QStringLiteral("[WAD_INJECT] Closed: %1\n").arg(filename));
 
-			// Skip original function (returns void)
 			cpuRegs.pc = cpuRegs.GPR.n.ra.UL[0];
 			g_executionHookSkipBlock = true;
 			return;
 		}
 	}
 
-	// Not injected - log and let original run
 	GameEventLogWindow::logFileClose(thisPtr, (u32)fHandle);
 }
 
 // Hook for sysFile::IsReadDone at 0x17af78
-// Returns: bool (true if read complete, false if pending)
-// This is polled by the game after async reads - we must return true for injected files
 static void hookSysFileIsReadDone()
 {
 	u32 thisPtr = cpuRegs.GPR.n.a0.UL[0];
 	s32 fHandle = *(s32*)PSM(thisPtr + 0x00);
 
-	// Check if this is an injected file
 	if (fHandle == GameEventLogWindow::INJECTED_HANDLE_MAGIC)
 	{
-		// Injected files are always "done" - we read synchronously
-		cpuRegs.GPR.n.v0.UL[0] = 1;  // return true
+		cpuRegs.GPR.n.v0.UL[0] = 1;
 		cpuRegs.pc = cpuRegs.GPR.n.ra.UL[0];
 		g_executionHookSkipBlock = true;
 		return;
 	}
-	// Let original run for non-injected files
 }
 
 // Hook for wadLoader::ProcessWadFile at 0x185f28
@@ -442,7 +320,6 @@ static void hookWadLoaderProcessWadFile()
 GameEventLogWindow::GameEventLogWindow()
 	: QMainWindow()
 {
-	// Load custom WAD directory setting
 	s_customWadDirectory = QString::fromStdString(
 		Host::GetBaseStringSettingValue("GameEventLog", "CustomWadDirectory", ""));
 
@@ -450,10 +327,14 @@ GameEventLogWindow::GameEventLogWindow()
 	createUi();
 	initHooks();
 
-	// Log current injection directory if set
+	// Start timer for updating trace stats table
+	m_updateTimer = new QTimer(this);
+	connect(m_updateTimer, &QTimer::timeout, this, &GameEventLogWindow::updateTraceTable);
+	m_updateTimer->start(500);  // Update every 500ms
+
 	if (!s_customWadDirectory.isEmpty())
 	{
-		appendMessage(QStringLiteral("[CONFIG] Custom WAD directory loaded: %1\n").arg(s_customWadDirectory));
+		appendMessage(QStringLiteral("[CONFIG] Custom WAD directory: %1\n").arg(s_customWadDirectory));
 	}
 }
 
@@ -568,7 +449,6 @@ void GameEventLogWindow::logFileRead(u32 sysFilePtr, u32 handle, u32 buffer, u32
 	if (!g_game_event_log_window)
 		return;
 
-	// Skip if file read logs are disabled
 	if (!s_fileReadLogsEnabled)
 		return;
 
@@ -596,7 +476,6 @@ void GameEventLogWindow::logFileClose(u32 sysFilePtr, u32 handle)
 	if (!g_game_event_log_window)
 		return;
 
-	// Skip logging closes on invalid handles (already closed or never opened)
 	if (handle == 0xFFFFFFFF)
 		return;
 
@@ -638,8 +517,6 @@ void GameEventLogWindow::logWadProcess(const char* wadName)
 void GameEventLogWindow::closeEvent(QCloseEvent* event)
 {
 	saveSize();
-
-	// Just hide the window instead of destroying it
 	event->ignore();
 	hide();
 }
@@ -680,6 +557,44 @@ void GameEventLogWindow::onSetWadDirectoryTriggered()
 		Host::CommitBaseSettingChanges();
 
 		appendMessage(QStringLiteral("[CONFIG] Custom WAD directory: %1\n").arg(dir));
+	}
+}
+
+void GameEventLogWindow::updateTraceTable()
+{
+	if (s_clientParmHookId == 0)
+		return;
+
+	auto stats = MemoryTraceManager::Instance().GetHookTraceStats(s_clientParmHookId);
+
+	// Sort by count (descending)
+	std::vector<std::pair<TraceKey, u32>> sorted(stats.begin(), stats.end());
+	std::sort(sorted.begin(), sorted.end(),
+		[](const auto& a, const auto& b) { return a.second > b.second; });
+
+	m_traceTable->setRowCount(static_cast<int>(sorted.size()));
+
+	int row = 0;
+	for (const auto& [key, count] : sorted)
+	{
+		// Offset column
+		m_traceTable->setItem(row, 0,
+			new QTableWidgetItem(QString("0x%1").arg(key.offset, 4, 16, QChar('0'))));
+
+		// Count column
+		m_traceTable->setItem(row, 1,
+			new QTableWidgetItem(QString::number(count)));
+
+		// Stack columns (4 PCs)
+		for (int i = 0; i < 4; i++)
+		{
+			QString pcStr = key.stack.pcs[i] != 0
+				? QString("0x%1").arg(key.stack.pcs[i], 8, 16, QChar('0'))
+				: QString();
+			m_traceTable->setItem(row, 2 + i, new QTableWidgetItem(pcStr));
+		}
+
+		row++;
 	}
 }
 
@@ -778,12 +693,26 @@ void GameEventLogWindow::createUi()
 		s_fileReadLogsEnabled = checked;
 	});
 
+	// Create splitter for log and trace table
+	QSplitter* splitter = new QSplitter(Qt::Vertical, this);
+
+	// Log text area
 	m_text = new QPlainTextEdit(this);
 	m_text->setReadOnly(true);
 	m_text->setUndoRedoEnabled(false);
 	m_text->setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
 	m_text->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
 	m_text->setWordWrapMode(QTextOption::WrapAnywhere);
+
+	// Trace stats table
+	m_traceTable = new QTableWidget(this);
+	m_traceTable->setColumnCount(6);
+	m_traceTable->setHorizontalHeaderLabels({tr("Offset"), tr("Count"), tr("PC[0]"), tr("PC[1]"), tr("PC[2]"), tr("PC[3]")});
+	m_traceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+	m_traceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+	m_traceTable->horizontalHeader()->setStretchLastSection(true);
+	m_traceTable->verticalHeader()->setVisible(false);
+	m_traceTable->setSortingEnabled(false);
 
 #if defined(_WIN32)
 	QFont font("Consolas");
@@ -796,8 +725,13 @@ void GameEventLogWindow::createUi()
 	font.setStyleHint(QFont::TypeWriter);
 #endif
 	m_text->setFont(font);
+	m_traceTable->setFont(font);
 
-	setCentralWidget(m_text);
+	splitter->addWidget(m_text);
+	splitter->addWidget(m_traceTable);
+	splitter->setSizes({300, 200});
+
+	setCentralWidget(splitter);
 }
 
 void GameEventLogWindow::saveSize()
@@ -847,31 +781,39 @@ const char* GameEventLogWindow::getCommandName(u16 cmdType)
 
 void GameEventLogWindow::initHooks()
 {
-	// Register hook for GameWadLoader::AddCommand at 0x001bb0f8
 	addExecutionHook(0x1BB0F8, hookWadEventAdded);
+	addExecutionHook(0x17AD70, hookSysFileOpenResource);
+	addExecutionHook(0x17AF78, hookSysFileIsReadDone);
+	addExecutionHook(0x17AFE0, hookSysFileRead);
+	addExecutionHook(0x17AEE8, hookSysFileClose);
+	addExecutionHook(0x185F28, hookWadLoaderProcessWadFile);
 
-	// File I/O hooks for tracing WAD file operations
-	addExecutionHook(0x17AD70, hookSysFileOpenResource);  // sysFile::OpenResource
-	addExecutionHook(0x17AF78, hookSysFileIsReadDone);    // sysFile::IsReadDone
-	addExecutionHook(0x17AFE0, hookSysFileRead);          // sysFile::Read
-	addExecutionHook(0x17AEE8, hookSysFileClose);         // sysFile::Close
-	addExecutionHook(0x185F28, hookWadLoaderProcessWadFile); // wadLoader::ProcessWadFile
+	s_clientParmHookId = MemoryTraceManager::Instance().RegisterHook(
+		"IFFProcessClientParm",
+		onClientParmTraceResult,
+		MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE
+	);
 
-	// Memory trace hook for resource parsing analysis
-	addExecutionHook(0x01789e0, hookIFFProcessClientParm);  // IFFProcessClientParm
+	// addExecutionHook(0x01789e0, hookIFFProcessClientParm);  // Disabled
+	addExecutionHook(0x00133fec, hookAfterStrcpy);
 }
 
 void GameEventLogWindow::shutdownHooks()
 {
-	// Remove all hooks when window is destroyed
 	removeExecutionHook(0x1BB0F8);
 	removeExecutionHook(0x17AD70);
 	removeExecutionHook(0x17AF78);
 	removeExecutionHook(0x17AFE0);
 	removeExecutionHook(0x17AEE8);
 	removeExecutionHook(0x185F28);
-	removeExecutionHook(0x01789e0);
+	// removeExecutionHook(0x01789e0);  // Disabled
+	removeExecutionHook(0x00133fec);
 
-	// Flush any remaining memory traces
-	MemoryTraceManager::Instance().FlushAllTraces();
+	if (s_clientParmHookId != 0)
+	{
+		MemoryTraceManager::Instance().UnregisterHook(s_clientParmHookId);
+		s_clientParmHookId = 0;
+	}
+
+	MemoryTraceManager::Instance().ClearAllTraces();
 }

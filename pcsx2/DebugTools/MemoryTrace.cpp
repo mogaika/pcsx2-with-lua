@@ -4,8 +4,15 @@
 #include "MemoryTrace.h"
 
 #include "common/Console.h"
+#include "Memory.h"
+#include "R5900.h"
+
+#include <cstring>
 
 static constexpr u32 PAGE_SHIFT = 12;
+
+// Fast-path region array for JIT - each byte represents 64KB
+u8 g_memTraceRegions[65536] = {0};
 
 MemoryTraceManager& MemoryTraceManager::Instance()
 {
@@ -13,55 +20,148 @@ MemoryTraceManager& MemoryTraceManager::Instance()
 	return instance;
 }
 
-u32 MemoryTraceManager::AddTrace(u32 start, u32 size, const std::string& description,
-	MemTraceResultCallback callback,
-	u32 flags,
-	void* userData)
+StackTrace MemoryTraceManager::CaptureStackTrace(u32 pc)
 {
-	std::unique_lock lock(m_mutex);
+	StackTrace trace = {};
+	trace.pcs[0] = (pc != 0) ? pc : cpuRegs.pc;
 
-	u32 traceId = m_nextTraceId++;
+	// Get RA (return address)
+	u32 ra = cpuRegs.GPR.n.ra.UL[0];
+	if (ra != 0 && ra >= 0x00100000 && ra < 0x02000000)
+		trace.pcs[1] = ra;
 
-	MemoryTraceRegion region;
-	region.id = traceId;
-	region.start = start;
-	region.end = start + size;
-	region.flags = flags;
-	region.firstWritePC = 0;
-	region.completed = false;
-	region.callback = std::move(callback);
-	region.userData = userData;
-	region.description = description;
+	// Try to walk back further using SP
+	u32 sp = cpuRegs.GPR.n.sp.UL[0];
+	if (sp >= 0x00100000 && sp < 0x02000000)
+	{
+		static const u32 offsets[] = {0x10, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x2c};
 
-	m_traces[traceId] = std::move(region);
-	UpdateTracedPages();
+		for (int i = 2; i < 4; i++)
+		{
+			bool found = false;
+			for (u32 offset : offsets)
+			{
+				u32 stackAddr = sp + offset + (i - 2) * 0x30;
+				if (stackAddr >= 0x02000000)
+					break;
 
-	Console.WriteLn("[MemTrace] Added trace %u: 0x%08X-0x%08X (%s) - %zu pages tracked, page=0x%05X",
-		traceId, start, start + size, description.c_str(), m_tracedPages.size(), start >> PAGE_SHIFT);
+				u32 possibleRA = memRead32(stackAddr);
+				if (possibleRA >= 0x00100000 && possibleRA < 0x02000000 && (possibleRA & 3) == 0)
+				{
+					trace.pcs[i] = possibleRA;
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				break;
+		}
+	}
 
-	return traceId;
+	return trace;
 }
 
-void MemoryTraceManager::RemoveTrace(u32 traceId)
+u32 MemoryTraceManager::RegisterHook(const std::string& hookName, MemTraceHookCallback callback,
+	u32 flags, void* userData)
 {
 	std::unique_lock lock(m_mutex);
 
-	auto it = m_traces.find(traceId);
-	if (it != m_traces.end())
+	u32 hookId = m_nextHookId++;
+
+	HookTrace hook;
+	hook.hookId = hookId;
+	hook.hookName = hookName;
+	hook.flags = flags;
+	hook.callback = std::move(callback);
+	hook.userData = userData;
+
+	m_hooks[hookId] = std::move(hook);
+
+	Console.WriteLn("[MemTrace] Registered hook %u: '%s'", hookId, hookName.c_str());
+	return hookId;
+}
+
+void MemoryTraceManager::AddTracedRange(u32 hookId, u32 start, u32 size)
+{
+	std::unique_lock lock(m_mutex);
+
+	auto it = m_hooks.find(hookId);
+	if (it == m_hooks.end())
+		return;
+
+	TracedRange range;
+	range.start = start;
+	range.end = start + size;
+	it->second.ranges.push_back(range);
+
+	UpdateTracedPages();
+
+	Console.WriteLn("[MemTrace] Hook %u: added range 0x%08X-0x%08X (%zu ranges)",
+		hookId, start, start + size, it->second.ranges.size());
+}
+
+void MemoryTraceManager::RemoveTracedRange(u32 hookId, u32 start)
+{
+	std::unique_lock lock(m_mutex);
+
+	auto it = m_hooks.find(hookId);
+	if (it == m_hooks.end())
+		return;
+
+	auto& ranges = it->second.ranges;
+	for (auto rangeIt = ranges.begin(); rangeIt != ranges.end(); ++rangeIt)
 	{
-		Console.WriteLn("[MemTrace] Removed trace %u: %s", traceId, it->second.description.c_str());
-		m_traces.erase(it);
-		UpdateTracedPages();
+		if (rangeIt->start == start)
+		{
+			ranges.erase(rangeIt);
+			break;
+		}
 	}
+
+	UpdateTracedPages();
+}
+
+void MemoryTraceManager::FlushHook(u32 hookId)
+{
+	std::unique_lock lock(m_mutex);
+
+	auto it = m_hooks.find(hookId);
+	if (it == m_hooks.end())
+		return;
+
+	HookTrace& hook = it->second;
+
+	if (hook.callback && !hook.stats.empty())
+		hook.callback(hook);
+
+	hook.ranges.clear();
+	hook.stats.clear();
+	hook.firstWritePC = 0;
+	hook.completed = false;
+
+	UpdateTracedPages();
+}
+
+void MemoryTraceManager::UnregisterHook(u32 hookId)
+{
+	std::unique_lock lock(m_mutex);
+
+	auto it = m_hooks.find(hookId);
+	if (it == m_hooks.end())
+		return;
+
+	Console.WriteLn("[MemTrace] Unregistered hook %u: '%s'", hookId, it->second.hookName.c_str());
+	m_hooks.erase(it);
+
+	UpdateTracedPages();
 }
 
 void MemoryTraceManager::ClearAllTraces()
 {
 	std::unique_lock lock(m_mutex);
-
-	m_traces.clear();
+	m_hooks.clear();
 	m_tracedPages.clear();
-	Console.WriteLn("[MemTrace] Cleared all traces");
+	std::memset(g_memTraceRegions, 0, sizeof(g_memTraceRegions));
 }
 
 void MemoryTraceManager::OnMemoryRead(u32 addr, u32 size, u32 pc)
@@ -74,90 +174,43 @@ void MemoryTraceManager::OnMemoryWrite(u32 addr, u32 size, u32 pc)
 	ProcessAccess(addr, size, pc, true);
 }
 
-void MemoryTraceManager::FlushTrace(u32 traceId)
-{
-	std::unique_lock lock(m_mutex);
-
-	auto it = m_traces.find(traceId);
-	if (it != m_traces.end())
-	{
-		CompleteTrace(it->second);
-		m_traces.erase(it);
-		UpdateTracedPages();
-	}
-}
-
-void MemoryTraceManager::FlushAllTraces()
-{
-	std::unique_lock lock(m_mutex);
-
-	for (auto& [id, region] : m_traces)
-	{
-		if (!region.completed)
-		{
-			CompleteTrace(region);
-		}
-	}
-
-	m_traces.clear();
-	m_tracedPages.clear();
-	Console.WriteLn("[MemTrace] Flushed all traces");
-}
-
 bool MemoryTraceManager::HasActiveTraces() const
 {
-	// Note: Not thread-safe but acceptable for fast-path check
-	// The actual operations acquire the mutex
 	return !m_tracedPages.empty();
 }
 
-size_t MemoryTraceManager::GetActiveTraceCount() const
+std::map<TraceKey, u32> MemoryTraceManager::GetHookTraceStats(u32 hookId) const
 {
 	std::unique_lock lock(m_mutex);
-	return m_traces.size();
-}
 
-bool MemoryTraceManager::IsPageTraced(u32 addr) const
-{
-	u32 page = addr >> PAGE_SHIFT;
-	// Note: Not thread-safe but acceptable for fast-path check
-	return m_tracedPages.count(page) > 0;
-}
+	auto it = m_hooks.find(hookId);
+	if (it == m_hooks.end())
+		return {};
 
-// Debug function to dump current trace state
-void MemoryTraceManager::DumpTraceState() const
-{
-	std::unique_lock lock(m_mutex);
-	Console.WriteLn("[MemTrace] === Trace State Dump ===");
-	Console.WriteLn("[MemTrace] Active traces: %zu, Traced pages: %zu", m_traces.size(), m_tracedPages.size());
-	for (const auto& [id, region] : m_traces)
-	{
-		Console.WriteLn("[MemTrace]   Trace %u: 0x%08X-0x%08X '%s' completed=%d reads=%zu",
-			id, region.start, region.end, region.description.c_str(), region.completed, region.readInfo.size());
-	}
-	Console.WriteLn("[MemTrace] Traced pages:");
-	for (u32 page : m_tracedPages)
-	{
-		Console.WriteLn("[MemTrace]   Page 0x%05X (addr range 0x%08X-0x%08X)", page, page << PAGE_SHIFT, ((page + 1) << PAGE_SHIFT) - 1);
-	}
-	Console.WriteLn("[MemTrace] === End Dump ===");
+	return it->second.stats;
 }
 
 void MemoryTraceManager::UpdateTracedPages()
 {
 	m_tracedPages.clear();
+	std::memset(g_memTraceRegions, 0, sizeof(g_memTraceRegions));
 
-	for (const auto& [id, region] : m_traces)
+	for (const auto& [id, hook] : m_hooks)
 	{
-		if (region.completed)
+		if (hook.completed)
 			continue;
 
-		u32 startPage = region.start >> PAGE_SHIFT;
-		u32 endPage = (region.end - 1) >> PAGE_SHIFT;
-
-		for (u32 page = startPage; page <= endPage; ++page)
+		for (const auto& range : hook.ranges)
 		{
-			m_tracedPages.insert(page);
+			// Update page set
+			u32 startPage = range.start >> PAGE_SHIFT;
+			u32 endPage = (range.end - 1) >> PAGE_SHIFT;
+			for (u32 page = startPage; page <= endPage; ++page)
+				m_tracedPages.insert(page);
+
+			// Update region array
+			for (u32 r = range.start >> 16; r <= ((range.end - 1) >> 16); ++r)
+				g_memTraceRegions[r] = 1;
 		}
 	}
 }
@@ -171,116 +224,53 @@ void MemoryTraceManager::ProcessAccess(u32 addr, u32 size, u32 pc, bool isWrite)
 	if (m_tracedPages.count(page) == 0)
 		return;
 
-	// Find which region(s) this access falls into
-	std::vector<u32> completedTraces;
+	u32 accessEnd = addr + size;
 
-	for (auto& [id, region] : m_traces)
+	for (auto& [id, hook] : m_hooks)
 	{
-		if (region.completed)
+		if (hook.completed)
 			continue;
 
-		// Check if any byte of the access falls within the region
-		u32 accessEnd = addr + size;
-		if (addr >= region.end || accessEnd <= region.start)
-			continue;
-
-		// Access overlaps with this region
-		if (isWrite)
+		// Find which range this access falls into
+		for (const auto& range : hook.ranges)
 		{
-			// Handle write access
-			if (region.flags & MEMTRACE_STOP_ON_WRITE)
-			{
-				// Stop and report on first write
-				region.firstWritePC = pc;
-				region.completed = true;
-				completedTraces.push_back(id);
+			if (addr >= range.end || accessEnd <= range.start)
+				continue;
 
-				// Always log when trace is stopped due to write
-				Console.WriteLn("[MemTrace] Trace %u '%s' STOPPED: Write at 0x%08X from PC=0x%08X (region 0x%08X-0x%08X, %zu reads tracked)",
-					id, region.description.c_str(), addr, pc, region.start, region.end, region.readInfo.size());
-			}
-			else if (region.flags & MEMTRACE_TRACK_WRITES)
+			// Access overlaps this range
+			if (isWrite)
 			{
-				// Track the write
-				for (u32 a = addr; a < accessEnd && a < region.end; ++a)
+				if (hook.flags & MEMTRACE_STOP_ON_WRITE)
 				{
-					if (a >= region.start)
-					{
-						auto& info = region.writeInfo[a];
-						info.count++;
-						info.pcCounts[pc]++;
-					}
+					hook.firstWritePC = pc;
+					hook.completed = true;
+
+					if (hook.callback)
+						hook.callback(hook);
+
+					hook.ranges.clear();
+					hook.stats.clear();
+					hook.firstWritePC = 0;
+					hook.completed = false;
+					UpdateTracedPages();
+					return;
 				}
-
-				if (region.flags & MEMTRACE_LOG_EACH_ACCESS)
+				else if (hook.flags & MEMTRACE_TRACK_WRITES)
 				{
-					Console.WriteLn("[MemTrace] Write to trace %u at 0x%08X (size %u) from PC=0x%08X",
-						id, addr, size, pc);
+					TraceKey key;
+					key.offset = addr - range.start;
+					key.stack = CaptureStackTrace(pc);
+					hook.stats[key]++;
 				}
 			}
-		}
-		else
-		{
-			// Handle read access
-			if (region.flags & MEMTRACE_TRACK_READS)
+			else if (hook.flags & MEMTRACE_TRACK_READS)
 			{
-				for (u32 a = addr; a < accessEnd && a < region.end; ++a)
-				{
-					if (a >= region.start)
-					{
-						auto& info = region.readInfo[a];
-						info.count++;
-						info.pcCounts[pc]++;
-					}
-				}
-
-				if (region.flags & MEMTRACE_LOG_EACH_ACCESS)
-				{
-					Console.WriteLn("[MemTrace] Read from trace %u at 0x%08X (size %u) from PC=0x%08X",
-						id, addr, size, pc);
-				}
+				TraceKey key;
+				key.offset = addr - range.start;
+				key.stack = CaptureStackTrace(pc);
+				hook.stats[key]++;
 			}
+			break;  // Only count once per hook
 		}
 	}
-
-	// Process completed traces (call callbacks and remove)
-	for (u32 traceId : completedTraces)
-	{
-		auto it = m_traces.find(traceId);
-		if (it != m_traces.end())
-		{
-			CompleteTrace(it->second);
-			m_traces.erase(it);
-		}
-	}
-
-	if (!completedTraces.empty())
-	{
-		UpdateTracedPages();
-	}
-}
-
-MemoryTraceRegion* MemoryTraceManager::FindRegionForAddress(u32 addr)
-{
-	for (auto& [id, region] : m_traces)
-	{
-		if (!region.completed && addr >= region.start && addr < region.end)
-		{
-			return &region;
-		}
-	}
-	return nullptr;
-}
-
-void MemoryTraceManager::CompleteTrace(MemoryTraceRegion& region)
-{
-	Console.WriteLn("[MemTrace] Completing trace %u: %s (reads: %zu addresses, writes: %zu addresses)",
-		region.id, region.description.c_str(), region.readInfo.size(), region.writeInfo.size());
-
-	if (region.callback)
-	{
-		region.callback(region.start, region.end, region.readInfo, region.writeInfo, region.firstWritePC, region.userData);
-	}
-
-	region.completed = true;
 }

@@ -5,6 +5,7 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include <array>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -15,85 +16,104 @@
 // Trace options flags
 enum MemTraceFlags : u32
 {
-	MEMTRACE_TRACK_READS = 0x01,     // Track read accesses (default)
-	MEMTRACE_TRACK_WRITES = 0x02,    // Track write accesses
-	MEMTRACE_STOP_ON_WRITE = 0x04,   // Stop trace and report when ANY write occurs to region
-	MEMTRACE_LOG_EACH_ACCESS = 0x08, // Log each access as it happens (verbose)
+	MEMTRACE_TRACK_READS = 0x01,
+	MEMTRACE_TRACK_WRITES = 0x02,
+	MEMTRACE_STOP_ON_WRITE = 0x04,
 
-	// Common combinations
 	MEMTRACE_DEFAULT = MEMTRACE_TRACK_READS,
-	MEMTRACE_TRACK_UNTIL_REUSED = MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE,
 };
 
-struct MemoryAccessInfo
+// Stack trace structure - captures exactly 4 PCs in call chain
+struct StackTrace
 {
-	u32 count;                  // Total access count
-	std::map<u32, u32> pcCounts; // PC -> count (which code locations accessed this address)
+	std::array<u32, 4> pcs = {0, 0, 0, 0};
+
+	bool operator==(const StackTrace& other) const { return pcs == other.pcs; }
+	bool operator<(const StackTrace& other) const { return pcs < other.pcs; }
+};
+
+// Key for tracking unique (offset, stack) pairs
+struct TraceKey
+{
+	u32 offset = 0;
+	StackTrace stack;
+
+	bool operator<(const TraceKey& other) const
+	{
+		if (offset != other.offset)
+			return offset < other.offset;
+		return stack < other.stack;
+	}
+};
+
+// A single address range within a hook's trace
+struct TracedRange
+{
+	u32 start = 0;
+	u32 end = 0;
 };
 
 // Forward declaration for callback type
-struct MemoryTraceRegion;
+struct HookTrace;
 
-// Callback type for trace results
-// Parameters: start, end, readInfo, writeInfo, firstWritePC, userData
-using MemTraceResultCallback = std::function<void(
-	u32 start,
-	u32 end,
-	const std::map<u32, MemoryAccessInfo>& readInfo,
-	const std::map<u32, MemoryAccessInfo>& writeInfo,
-	u32 firstWritePC,
-	void* userData)>;
+// Callback type for hook trace results
+using MemTraceHookCallback = std::function<void(const HookTrace& trace)>;
 
-struct MemoryTraceRegion
+// Per-hook trace data
+struct HookTrace
 {
-	u32 id;
-	u32 start;
-	u32 end;
-	u32 flags;
-	std::map<u32, MemoryAccessInfo> readInfo;  // address -> read info with PC tracking
-	std::map<u32, MemoryAccessInfo> writeInfo; // address -> write info (if MEMTRACE_TRACK_WRITES)
-	u32 firstWritePC;                          // PC when first write detected
-	bool completed;                            // Trace is done (write detected with STOP_ON_WRITE)
-	MemTraceResultCallback callback;
-	void* userData;
-	std::string description;
+	u32 hookId = 0;
+	std::string hookName;
+	u32 flags = 0;
+	std::vector<TracedRange> ranges;
+	std::map<TraceKey, u32> stats;  // (offset, stack) -> count
+	u32 firstWritePC = 0;
+	bool completed = false;
+	MemTraceHookCallback callback;
+	void* userData = nullptr;
 };
+
+// Fast-path region array for JIT - each byte represents 64KB
+// Non-zero = region has active traces
+// Index: addr >> 16 (covers full 32-bit address space, 64KB array)
+extern u8 g_memTraceRegions[65536];
 
 class MemoryTraceManager
 {
 public:
 	static MemoryTraceManager& Instance();
 
-	// Add a trace region (returns trace ID)
-	// Can be called from any execution hook to add traces dynamically
-	u32 AddTrace(u32 start, u32 size, const std::string& description,
-		MemTraceResultCallback callback,
-		u32 flags = MEMTRACE_DEFAULT,
-		void* userData = nullptr);
+	// Register a hook and get hookId
+	u32 RegisterHook(const std::string& hookName, MemTraceHookCallback callback,
+		u32 flags = MEMTRACE_DEFAULT, void* userData = nullptr);
 
-	// Remove trace by ID (stops tracing, does NOT trigger callback)
-	void RemoveTrace(u32 traceId);
+	// Add a traced range to an existing hook
+	void AddTracedRange(u32 hookId, u32 start, u32 size);
 
-	// Remove all traces
+	// Remove a specific range from hook
+	void RemoveTracedRange(u32 hookId, u32 start);
+
+	// Flush hook - triggers callback, clears stats
+	void FlushHook(u32 hookId);
+
+	// Unregister hook entirely
+	void UnregisterHook(u32 hookId);
+
+	// Clear all hooks
 	void ClearAllTraces();
 
-	// Called from memory access points - tracks both address and reading PC
+	// Called from memory access points
 	void OnMemoryRead(u32 addr, u32 size, u32 pc);
 	void OnMemoryWrite(u32 addr, u32 size, u32 pc);
 
-	// Manual flush - triggers callback with current results, then removes trace
-	void FlushTrace(u32 traceId);
-	void FlushAllTraces();
-
 	// Query
 	bool HasActiveTraces() const;
-	size_t GetActiveTraceCount() const;
 
-	// Check if an address is in any traced page (fast path)
-	bool IsPageTraced(u32 addr) const;
+	// Get trace stats for UI display (returns copy for thread safety)
+	std::map<TraceKey, u32> GetHookTraceStats(u32 hookId) const;
 
-	// Debug: dump current trace state to console
-	void DumpTraceState() const;
+	// Capture current 4-frame stack trace
+	static StackTrace CaptureStackTrace(u32 pc = 0);
 
 private:
 	MemoryTraceManager() = default;
@@ -103,11 +123,9 @@ private:
 
 	void UpdateTracedPages();
 	void ProcessAccess(u32 addr, u32 size, u32 pc, bool isWrite);
-	MemoryTraceRegion* FindRegionForAddress(u32 addr);
-	void CompleteTrace(MemoryTraceRegion& region);
 
 	mutable std::mutex m_mutex;
-	std::map<u32, MemoryTraceRegion> m_traces; // traceId -> region
-	std::unordered_set<u32> m_tracedPages;     // page = addr >> 12
-	u32 m_nextTraceId = 1;
+	std::map<u32, HookTrace> m_hooks;
+	std::unordered_set<u32> m_tracedPages;
+	u32 m_nextHookId = 1;
 };

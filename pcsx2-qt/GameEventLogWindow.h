@@ -8,9 +8,12 @@
 #include <QtCore/QFile>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPlainTextEdit>
+#include <QtWidgets/QTableWidget>
 
 #include <map>
 #include <utility>
+
+class QTimer;
 
 class GameEventLogWindow : public QMainWindow
 {
@@ -53,12 +56,13 @@ private Q_SLOTS:
 	void onClearTriggered();
 	void onSaveTriggered();
 	void onSetWadDirectoryTriggered();
+	void updateTraceTable();
 	void appendCommand(quint32 cmdType, quint32 param2, quint32 param3, const QString& name);
 	void appendMessage(const QString& message);
 
 private:
-	static constexpr int DEFAULT_WIDTH = 600;
-	static constexpr int DEFAULT_HEIGHT = 400;
+	static constexpr int DEFAULT_WIDTH = 800;
+	static constexpr int DEFAULT_HEIGHT = 600;
 
 	void createUi();
 	void saveSize();
@@ -68,7 +72,9 @@ private:
 	static void initHooks();
 	static void shutdownHooks();
 
-	QPlainTextEdit* m_text;
+	QPlainTextEdit* m_text = nullptr;
+	QTableWidget* m_traceTable = nullptr;
+	QTimer* m_updateTimer = nullptr;
 	QAction* m_fileReadLogsAction = nullptr;
 	bool m_destroying = false;
 
