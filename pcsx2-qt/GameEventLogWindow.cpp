@@ -124,24 +124,18 @@ static void hookIFFProcessClientParm()
 	MemoryTraceManager::Instance().AddTracedRange(s_clientParmHookId, traceStart, traceSize);
 }
 
-// Hook at 0x00133fec (after strcpy) to trace s0 register
-// Context:
-//   00133fe0 addiu   param_1,s0,0xc
-//   00133fe4 jal     strcpy
-//   00133fe8 addiu   param_2,s7,0x8
-//   00133fec b       LAB_00134300  <-- hook here
-//   00133ff0 move    v0,s0
-static void hookAfterStrcpy()
+// Hook at 0x001342f8 to trace v0 register range [v0+0x8, v0+0x44)
+static void hookTraceV0()
 {
 	if (s_clientParmHookId == 0)
 		return;
 
-	u32 s0 = cpuRegs.GPR.n.s0.UL[0];
-	if (s0 == 0)
+	u32 v0 = cpuRegs.GPR.n.v0.UL[0];
+	if (v0 == 0)
 		return;
 
-	u32 traceStart = s0;
-	u32 traceSize = 0x5c;
+	u32 traceStart = v0 + 0x8;
+	u32 traceSize = 0x44 - 0x8; // 0x3c bytes
 
 	MemoryTraceManager::Instance().AddTracedRange(s_clientParmHookId, traceStart, traceSize);
 }
@@ -789,13 +783,13 @@ void GameEventLogWindow::initHooks()
 	addExecutionHook(0x185F28, hookWadLoaderProcessWadFile);
 
 	s_clientParmHookId = MemoryTraceManager::Instance().RegisterHook(
-		"IFFProcessClientParm",
+		"goServer_LoadClient",
 		onClientParmTraceResult,
 		MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE
 	);
 
 	// addExecutionHook(0x01789e0, hookIFFProcessClientParm);  // Disabled
-	addExecutionHook(0x00133fec, hookAfterStrcpy);
+	addExecutionHook(0x001342f8, hookTraceV0);
 }
 
 void GameEventLogWindow::shutdownHooks()
@@ -807,7 +801,7 @@ void GameEventLogWindow::shutdownHooks()
 	removeExecutionHook(0x17AEE8);
 	removeExecutionHook(0x185F28);
 	// removeExecutionHook(0x01789e0);  // Disabled
-	removeExecutionHook(0x00133fec);
+	removeExecutionHook(0x001342f8);
 
 	if (s_clientParmHookId != 0)
 	{
