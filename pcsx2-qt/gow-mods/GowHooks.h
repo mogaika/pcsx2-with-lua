@@ -1,0 +1,12 @@
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
+
+#pragma once
+
+#include "common/Pcsx2Defs.h"
+
+// Hook ID for memory tracing (needed by GowModWindow::updateTraceTable)
+extern u32 g_gowTraceHookId;
+
+void gowInitHooks();
+void gowShutdownHooks();

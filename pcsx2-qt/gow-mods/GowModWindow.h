@@ -5,23 +5,19 @@
 
 #include "common/Pcsx2Defs.h"
 
-#include <QtCore/QFile>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QTableWidget>
 
-#include <map>
-#include <utility>
-
 class QTimer;
 
-class GameEventLogWindow : public QMainWindow
+class GowModWindow : public QMainWindow
 {
 	Q_OBJECT
 
 public:
-	GameEventLogWindow();
-	~GameEventLogWindow();
+	GowModWindow();
+	~GowModWindow();
 
 	static void updateSettings();
 	static void destroy();
@@ -37,17 +33,8 @@ public:
 	static bool isFileReadLogsEnabled();
 	static void setFileReadLogsEnabled(bool enabled);
 
-	// WAD injection
-	static void setCustomWadDirectory(const QString& dir);
-	static QString customWadDirectory();
+	// WAD injection logging
 	static void logInjectionMessage(const QString& message);
-
-	// Magic handle value to identify injected files
-	static constexpr s32 INJECTED_HANDLE_MAGIC = -100;
-
-	// Map: sysFile EE pointer -> (host QFile*, filename)
-	static std::map<u32, std::pair<QFile*, QString>> s_injectedFiles;
-	static QString s_customWadDirectory;
 
 protected:
 	void closeEvent(QCloseEvent* event) override;
@@ -69,8 +56,6 @@ private:
 	void restoreSize();
 
 	static const char* getCommandName(u16 cmdType);
-	static void initHooks();
-	static void shutdownHooks();
 
 	QPlainTextEdit* m_text = nullptr;
 	QTableWidget* m_traceTable = nullptr;
@@ -81,4 +66,4 @@ private:
 	static bool s_fileReadLogsEnabled;
 };
 
-extern GameEventLogWindow* g_game_event_log_window;
+extern GowModWindow* g_gow_mod_window;

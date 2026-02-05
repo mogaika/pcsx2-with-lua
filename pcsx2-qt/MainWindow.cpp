@@ -5,7 +5,7 @@
 #include "AutoUpdaterDialog.h"
 #include "CoverDownloadDialog.h"
 #include "DisplayWidget.h"
-#include "GameEventLogWindow.h"
+#include "gow-mods/GowModWindow.h"
 #include "GameList/GameListRefreshThread.h"
 #include "GameList/GameListWidget.h"
 #include "LogWindow.h"
@@ -2917,15 +2917,15 @@ void MainWindow::openDebugger()
 
 void MainWindow::openGameEventLog()
 {
-	if (!g_game_event_log_window)
+	if (!g_gow_mod_window)
 	{
-		g_game_event_log_window = new GameEventLogWindow();
+		g_gow_mod_window = new GowModWindow();
 	}
 
-	if (g_game_event_log_window->isVisible())
-		g_game_event_log_window->activateWindow();
+	if (g_gow_mod_window->isVisible())
+		g_gow_mod_window->activateWindow();
 	else
-		g_game_event_log_window->show();
+		g_gow_mod_window->show();
 }
 
 void MainWindow::doControllerSettings(ControllerSettingsWindow::Category category)
