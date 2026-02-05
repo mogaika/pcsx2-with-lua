@@ -5,8 +5,10 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPlainTextEdit>
+#include <QtWidgets/QTabWidget>
 #include <QtWidgets/QTableWidget>
 
 class QTimer;
@@ -43,6 +45,7 @@ private Q_SLOTS:
 	void onClearTriggered();
 	void onSaveTriggered();
 	void onSetWadDirectoryTriggered();
+	void onLoadLevelTriggered();
 	void updateTraceTable();
 	void appendCommand(quint32 cmdType, quint32 param2, quint32 param3, const QString& name);
 	void appendMessage(const QString& message);
@@ -58,7 +61,9 @@ private:
 	static const char* getCommandName(u16 cmdType);
 
 	QPlainTextEdit* m_text = nullptr;
+	QTabWidget* m_tabWidget = nullptr;
 	QTableWidget* m_traceTable = nullptr;
+	QLineEdit* m_levelNameEdit = nullptr;
 	QTimer* m_updateTimer = nullptr;
 	QAction* m_fileReadLogsAction = nullptr;
 	bool m_destroying = false;

@@ -8,5 +8,8 @@
 // Hook ID for memory tracing (needed by GowModWindow::updateTraceTable)
 extern u32 g_gowTraceHookId;
 
+class QString;
+
 void gowInitHooks();
 void gowShutdownHooks();
+void gowLoadCustomLevel(const QString& levelName);

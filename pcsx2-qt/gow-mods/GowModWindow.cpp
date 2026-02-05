@@ -14,9 +14,10 @@
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QMenuBar>
+#include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
-#include <QtWidgets/QSplitter>
 #include <QtWidgets/QTableWidget>
 #include <QtWidgets/QVBoxLayout>
 
@@ -300,6 +301,25 @@ void GowModWindow::onSetWadDirectoryTriggered()
 	}
 }
 
+void GowModWindow::onLoadLevelTriggered()
+{
+	QString levelName = m_levelNameEdit->text().trimmed();
+
+	// Strip .WAD suffix if present (case-insensitive)
+	if (levelName.endsWith(QStringLiteral(".WAD"), Qt::CaseInsensitive))
+		levelName.chop(4);
+
+	// Truncate to 7 chars
+	if (levelName.length() > 7)
+		levelName.truncate(7);
+
+	if (levelName.isEmpty())
+		return;
+
+	gowLoadCustomLevel(levelName);
+	appendMessage(QStringLiteral("[LEVEL_LOAD] Loading level: %1\n").arg(levelName));
+}
+
 void GowModWindow::updateTraceTable()
 {
 	if (g_gowTraceHookId == 0)
@@ -433,10 +453,28 @@ void GowModWindow::createUi()
 		s_fileReadLogsEnabled = checked;
 	});
 
-	// Create splitter for log and trace table
-	QSplitter* splitter = new QSplitter(Qt::Vertical, this);
+	// Central container with vertical layout
+	QWidget* container = new QWidget(this);
+	QVBoxLayout* mainLayout = new QVBoxLayout(container);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
 
-	// Log text area
+	// Level loading bar
+	QHBoxLayout* levelBar = new QHBoxLayout();
+	m_levelNameEdit = new QLineEdit(this);
+	m_levelNameEdit->setText(QStringLiteral("Athn01A"));
+	m_levelNameEdit->setPlaceholderText(tr("Level name (e.g. Athn01A)"));
+	m_levelNameEdit->setMaxLength(7 + 4); // allow typing ".WAD" which gets stripped
+	QPushButton* loadBtn = new QPushButton(tr("Load Level"), this);
+	levelBar->addWidget(m_levelNameEdit);
+	levelBar->addWidget(loadBtn);
+	connect(loadBtn, &QPushButton::clicked, this, &GowModWindow::onLoadLevelTriggered);
+	connect(m_levelNameEdit, &QLineEdit::returnPressed, this, &GowModWindow::onLoadLevelTriggered);
+	mainLayout->addLayout(levelBar);
+
+	// Tab widget
+	m_tabWidget = new QTabWidget(this);
+
+	// Game Events tab
 	m_text = new QPlainTextEdit(this);
 	m_text->setReadOnly(true);
 	m_text->setUndoRedoEnabled(false);
@@ -444,7 +482,7 @@ void GowModWindow::createUi()
 	m_text->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
 	m_text->setWordWrapMode(QTextOption::WrapAnywhere);
 
-	// Trace stats table
+	// Memory Tracing tab
 	m_traceTable = new QTableWidget(this);
 	m_traceTable->setColumnCount(6);
 	m_traceTable->setHorizontalHeaderLabels({tr("Offset"), tr("Count"), tr("PC[0]"), tr("PC[1]"), tr("PC[2]"), tr("PC[3]")});
@@ -467,11 +505,11 @@ void GowModWindow::createUi()
 	m_text->setFont(font);
 	m_traceTable->setFont(font);
 
-	splitter->addWidget(m_text);
-	splitter->addWidget(m_traceTable);
-	splitter->setSizes({300, 200});
+	m_tabWidget->addTab(m_text, tr("Game Events"));
+	m_tabWidget->addTab(m_traceTable, tr("Memory Tracing"));
 
-	setCentralWidget(splitter);
+	mainLayout->addWidget(m_tabWidget);
+	setCentralWidget(container);
 }
 
 void GowModWindow::saveSize()
