@@ -106,17 +106,20 @@ static void recExitExecution();
 
 // EE Execution Hook System
 #include <map>
+void recClear(u32 addr, u32 size);
 std::map<u32, execution_hook_t> s_execution_hooks;
 bool g_executionHookSkipBlock = false;
 
 void addExecutionHook(u32 addr, execution_hook_t hook)
 {
 	s_execution_hooks[addr] = hook;
+	recClear(addr, 1);
 }
 
 void removeExecutionHook(u32 addr)
 {
 	s_execution_hooks.erase(addr);
+	recClear(addr, 1);
 }
 
 void clearExecutionHooks()

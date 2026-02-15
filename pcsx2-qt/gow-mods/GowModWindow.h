@@ -9,9 +9,6 @@
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QTabWidget>
-#include <QtWidgets/QTableWidget>
-
-class QTimer;
 
 class GowModWindow : public QMainWindow
 {
@@ -46,7 +43,6 @@ private Q_SLOTS:
 	void onSaveTriggered();
 	void onSetWadDirectoryTriggered();
 	void onLoadLevelTriggered();
-	void updateTraceTable();
 	void appendCommand(quint32 cmdType, quint32 param2, quint32 param3, const QString& name);
 	void appendMessage(const QString& message);
 
@@ -62,9 +58,7 @@ private:
 
 	QPlainTextEdit* m_text = nullptr;
 	QTabWidget* m_tabWidget = nullptr;
-	QTableWidget* m_traceTable = nullptr;
 	QLineEdit* m_levelNameEdit = nullptr;
-	QTimer* m_updateTimer = nullptr;
 	QAction* m_fileReadLogsAction = nullptr;
 	bool m_destroying = false;
 

@@ -3,11 +3,6 @@
 
 #pragma once
 
-#include "common/Pcsx2Defs.h"
-
-// Hook ID for memory tracing (needed by GowModWindow::updateTraceTable)
-extern u32 g_gowTraceHookId;
-
 class QString;
 
 void gowInitHooks();

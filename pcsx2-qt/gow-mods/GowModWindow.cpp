@@ -7,9 +7,6 @@
 #include "MainWindow.h"
 #include "QtHost.h"
 
-#include "DebugTools/MemoryTrace.h"
-
-#include <QtCore/QTimer>
 #include <QtGui/QIcon>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QHeaderView>
@@ -18,12 +15,9 @@
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
-#include <QtWidgets/QTableWidget>
 #include <QtWidgets/QVBoxLayout>
 
-#include <algorithm>
 #include <mutex>
-#include <vector>
 
 GowModWindow* g_gow_mod_window = nullptr;
 static std::mutex s_gow_mod_mutex;
@@ -66,11 +60,6 @@ GowModWindow::GowModWindow()
 	restoreSize();
 	createUi();
 	gowInitHooks();
-
-	// Start timer for updating trace stats table
-	m_updateTimer = new QTimer(this);
-	connect(m_updateTimer, &QTimer::timeout, this, &GowModWindow::updateTraceTable);
-	m_updateTimer->start(500); // Update every 500ms
 
 	QString wadDir = GowWadInjector::customWadDirectory();
 	if (!wadDir.isEmpty())
@@ -320,44 +309,6 @@ void GowModWindow::onLoadLevelTriggered()
 	appendMessage(QStringLiteral("[LEVEL_LOAD] Loading level: %1\n").arg(levelName));
 }
 
-void GowModWindow::updateTraceTable()
-{
-	if (g_gowTraceHookId == 0)
-		return;
-
-	auto stats = MemoryTraceManager::Instance().GetHookTraceStats(g_gowTraceHookId);
-
-	// Sort by count (descending)
-	std::vector<std::pair<TraceKey, u32>> sorted(stats.begin(), stats.end());
-	std::sort(sorted.begin(), sorted.end(),
-		[](const auto& a, const auto& b) { return a.second > b.second; });
-
-	m_traceTable->setRowCount(static_cast<int>(sorted.size()));
-
-	int row = 0;
-	for (const auto& [key, count] : sorted)
-	{
-		// Offset column
-		m_traceTable->setItem(row, 0,
-			new QTableWidgetItem(QString("0x%1").arg(key.offset, 4, 16, QChar('0'))));
-
-		// Count column
-		m_traceTable->setItem(row, 1,
-			new QTableWidgetItem(QString::number(count)));
-
-		// Stack columns (4 PCs)
-		for (int i = 0; i < 4; i++)
-		{
-			QString pcStr = key.stack.pcs[i] != 0
-				? QString("0x%1").arg(key.stack.pcs[i], 8, 16, QChar('0'))
-				: QString();
-			m_traceTable->setItem(row, 2 + i, new QTableWidgetItem(pcStr));
-		}
-
-		row++;
-	}
-}
-
 void GowModWindow::appendCommand(quint32 cmdType, quint32 param2, quint32 param3, const QString& name)
 {
 	QTextCursor temp_cursor = m_text->textCursor();
@@ -482,16 +433,6 @@ void GowModWindow::createUi()
 	m_text->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
 	m_text->setWordWrapMode(QTextOption::WrapAnywhere);
 
-	// Memory Tracing tab
-	m_traceTable = new QTableWidget(this);
-	m_traceTable->setColumnCount(6);
-	m_traceTable->setHorizontalHeaderLabels({tr("Offset"), tr("Count"), tr("PC[0]"), tr("PC[1]"), tr("PC[2]"), tr("PC[3]")});
-	m_traceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-	m_traceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-	m_traceTable->horizontalHeader()->setStretchLastSection(true);
-	m_traceTable->verticalHeader()->setVisible(false);
-	m_traceTable->setSortingEnabled(false);
-
 #if defined(_WIN32)
 	QFont font("Consolas");
 	font.setPointSize(10);
@@ -503,10 +444,8 @@ void GowModWindow::createUi()
 	font.setStyleHint(QFont::TypeWriter);
 #endif
 	m_text->setFont(font);
-	m_traceTable->setFont(font);
 
 	m_tabWidget->addTab(m_text, tr("Game Events"));
-	m_tabWidget->addTab(m_traceTable, tr("Memory Tracing"));
 
 	mainLayout->addWidget(m_tabWidget);
 	setCentralWidget(container);

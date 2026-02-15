@@ -5,15 +5,12 @@
 #include "GowModWindow.h"
 #include "GowWadInjector.h"
 
-#include "DebugTools/MemoryTrace.h"
 #include "Memory.h"
 #include "R5900.h"
 #include "x86/iR5900.h"
 
 #include <QtCore/QString>
 #include <cstring>
-
-u32 g_gowTraceHookId = 0;
 
 // Hook callback for GameWadLoader::AddCommand at 0x001bb0f8
 static void hookWadEventAdded()
@@ -31,51 +28,6 @@ static void hookWadEventAdded()
 	}
 
 	GowModWindow::logCommand(cmdType, param2, param3, name);
-}
-
-// Callback for hook results (called on write detection)
-static void onClientParmTraceResult(const HookTrace& trace)
-{
-	if (trace.firstWritePC != 0)
-	{
-		GowModWindow::logInjectionMessage(
-			QString("[TRACE] Overwritten at PC=0x%1\n").arg(trace.firstWritePC, 8, 16, QChar('0')));
-	}
-}
-
-// Hook for svrClientParm::IFFProcessClientParm at 0x01789e0
-static void hookIFFProcessClientParm()
-{
-	u32 headerPtr = cpuRegs.GPR.n.a0.UL[0];
-	u32 dataPtr = cpuRegs.GPR.n.a1.UL[0];
-
-	if (dataPtr == 0 || g_gowTraceHookId == 0)
-		return;
-
-	u32 magic = *(u32*)PSM(dataPtr);
-	if (magic != 0x00020001)
-		return;
-
-	u32 traceStart = dataPtr + 0x00;
-	u32 traceSize = 0x5c;
-
-	MemoryTraceManager::Instance().AddTracedRange(g_gowTraceHookId, traceStart, traceSize);
-}
-
-// Hook at 0x001342f8 to trace v0 register range [v0+0x8, v0+0x44)
-static void hookTraceV0()
-{
-	if (g_gowTraceHookId == 0)
-		return;
-
-	u32 v0 = cpuRegs.GPR.n.v0.UL[0];
-	if (v0 == 0)
-		return;
-
-	u32 traceStart = v0 + 0x8;
-	u32 traceSize = 0x44 - 0x8; // 0x3c bytes
-
-	MemoryTraceManager::Instance().AddTracedRange(g_gowTraceHookId, traceStart, traceSize);
 }
 
 // Hook for wadLoader::ProcessWadFile at 0x185f28
@@ -96,33 +48,14 @@ void gowInitHooks()
 	addExecutionHook(0x185F28, hookWadLoaderProcessWadFile);
 
 	GowWadInjector::initWadInjectorHooks();
-
-	g_gowTraceHookId = MemoryTraceManager::Instance().RegisterHook(
-		"goServer_LoadClient",
-		onClientParmTraceResult,
-		MEMTRACE_TRACK_READS | MEMTRACE_STOP_ON_WRITE
-	);
-
-	// addExecutionHook(0x01789e0, hookIFFProcessClientParm);  // Disabled
-	addExecutionHook(0x001342f8, hookTraceV0);
 }
 
 void gowShutdownHooks()
 {
 	removeExecutionHook(0x1BB0F8);
 	removeExecutionHook(0x185F28);
-	// removeExecutionHook(0x01789e0);  // Disabled
-	removeExecutionHook(0x001342f8);
 
 	GowWadInjector::shutdownWadInjectorHooks();
-
-	if (g_gowTraceHookId != 0)
-	{
-		MemoryTraceManager::Instance().UnregisterHook(g_gowTraceHookId);
-		g_gowTraceHookId = 0;
-	}
-
-	MemoryTraceManager::Instance().ClearAllTraces();
 }
 
 void gowLoadCustomLevel(const QString& levelName)
